@@ -1,12 +1,16 @@
-# Fix: Legion Go 2 gyroscope (IMU udev)
+# Fix: Legion Go 2 gyroscope
 
 ## Symptom
 
 Gyro does nothing in Steam Input / games on Lenovo Legion Go 2 (SteamOS), even though InputPlumber is running.
 
-## Cause (one line)
+## What this folder is
 
-Controller IMU stays **off** because stock SteamOS udev uses wrong sysfs attribute names and never sets `imu_enabled`.
+Knowledge + automation for Legion Go 2 gyro on SteamOS. Failures can have more than one cause; see **[KNOWLEDGE.md](KNOWLEDGE.md)** for architecture and documented cases.
+
+## Current script coverage
+
+`fix-legion-go2-gyro.sh` currently addresses **Case A** only: stock udev never enables handle IMUs (wrong sysfs names / missing `imu_enabled`). The script is expected to grow as more cases are documented.
 
 ## Apply
 
@@ -19,10 +23,6 @@ Asks for admin password (`pkexec`). Idempotent — safe after SteamOS updates.
 
 On failure, writes `~/Downloads/legion-go2-gyro-debug-<UTC>.txt`.
 
-## Durable knowledge
-
-See **[KNOWLEDGE.md](KNOWLEDGE.md)** for architecture, verification checklist, and anti-patterns.
-
-## System overlay created
+## System overlay created (Case A)
 
 `/etc/udev/rules.d/99-legion-go2-imu-fix.rules`

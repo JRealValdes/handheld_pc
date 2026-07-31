@@ -6,7 +6,7 @@ SteamOS handheld (DMI product `{83N0,83N1}`). Input stack: **InputPlumber** + **
 
 | Fix | Summary |
 |-----|---------|
-| [gyroscope-imu-udev](fixes/gyroscope-imu-udev/) | Enable controller IMU via corrected udev attrs so Steam Input gyro works |
+| [gyroscope-imu-udev](fixes/gyroscope-imu-udev/) | Gyro knowledge + fixes; script currently covers Case A (stock udev IMU attrs) |
 
 ## Official stack notes
 

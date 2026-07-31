@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Legion Go 2 gyro fix for SteamOS (InputPlumber + hid-lenovo-go).
 #
-# What it fixes:
-#   SteamOS ships a udev rule that writes obsolete attribute names
-#   (imu_bypass_enable) and never enables imu_enabled. Controller gyros
-#   stay off, so InputPlumber has nothing to forward.
+# Scope (grows over time — see KNOWLEDGE.md §3 Documented failure cases):
+#   Currently Case A only: stock udev writes imu_bypass_enable (missing "d")
+#   and never sets imu_enabled, so controller gyros stay off.
 #
-# What it does NOT do:
+# What it does NOT do (unless a future case documents otherwise):
 #   No cleanups, no custom InputPlumber binaries, no profile/target changes.
 #   SteamOS Manager already selects deck-uhid for Legion Go.
 #
@@ -326,7 +325,7 @@ main() {
   need_root "$@"
 
   log "Legion Go 2 gyro fix"
-  log "Scope: udev IMU attrs only (no cleanups, no custom binaries)"
+  log "Scope: Case A — stock udev IMU attrs (see KNOWLEDGE.md); no cleanups, no custom binaries"
   log ""
 
   install_udev_rule || true
