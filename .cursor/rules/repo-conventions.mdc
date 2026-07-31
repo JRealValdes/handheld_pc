@@ -1,0 +1,12 @@
+---
+description: Repo conventions for handheld_pc tools and fixes
+alwaysApply: true
+---
+
+# handheld_pc conventions
+
+- Scope: SteamOS / Linux handheld tools and fixes only.
+- Put work under `devices/<device>/fixes/<fix-name>/`.
+- Prefer stock SteamOS + tiny overlays (especially udev). Avoid custom InputPlumber binaries unless documented in that fix's `KNOWLEDGE.md`.
+- Do not invent cleanups or uninstallers unless the user asks.
+- When diagnosing Legion Go 2 gyro, read `devices/legion-go-2/fixes/gyroscope-imu-udev/KNOWLEDGE.md` first.

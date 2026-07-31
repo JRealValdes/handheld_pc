@@ -1,0 +1,13 @@
+---
+description: Legion Go 2 gyroscope / hid-lenovo-go IMU udev fix context
+globs: devices/legion-go-2/fixes/gyroscope-imu-udev/**
+alwaysApply: false
+---
+
+# Legion Go 2 gyro (IMU udev)
+
+Root cause: stock SteamOS udev writes `imu_bypass_enable` (missing `d`) and never sets `imu_enabled`. Controller gyros stay off. InputPlumber then has no usable handle IMU; it also filters screen IIO gyro when `hid_lenovo_go` is loaded.
+
+Fix: `/etc/udev/rules.d/99-legion-go2-imu-fix.rules` via `fix-legion-go2-gyro.sh`. Verify both handles `imu_enabled=true` and `imu_bypass_enabled=true`. Targets should be `deck-uhid` from steamos-manager.
+
+Never reintroduce `GYRO_GAIN=50` or custom InputPlumber overrides for this issue.
