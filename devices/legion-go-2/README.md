@@ -7,6 +7,7 @@ SteamOS handheld (DMI product `{83N0,83N1}`). Input stack: **InputPlumber** + **
 | Fix | Summary |
 |-----|---------|
 | [gyroscope-imu-udev](fixes/gyroscope-imu-udev/) | Gyro knowledge + fixes; script currently covers Case A (stock udev IMU attrs) |
+| [suspend-wake](fixes/suspend-wake/) | Open: fake suspend (LED stays red, no wake) — docs only, no fix yet |
 
 ## Official stack notes
 

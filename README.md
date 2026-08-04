@@ -18,7 +18,8 @@ handheld_pc/
 ├── devices/
 │   ├── legion-go-2/
 │   │   └── fixes/
-│   │       └── gyroscope-imu-udev/
+│   │       ├── gyroscope-imu-udev/
+│   │       └── suspend-wake/
 │   └── steam-deck/
 │       └── fixes/            # (future)
 └── docs/
