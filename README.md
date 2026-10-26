@@ -7,6 +7,7 @@ Tools and fixes for personal handheld PCs running SteamOS / Linux gaming stacks.
 | Device | Folder | Status |
 |--------|--------|--------|
 | Lenovo Legion Go 2 | [`devices/legion-go-2/`](devices/legion-go-2/) | Active |
+| PS5 + Ubuntu | [`devices/ps5-ubuntu/`](devices/ps5-ubuntu/) | Active (DualSense BT workaround) |
 | Valve Steam Deck | [`devices/steam-deck/`](devices/steam-deck/) | Placeholder |
 
 ## Layout
@@ -20,6 +21,9 @@ handheld_pc/
 │   │   └── fixes/
 │   │       ├── gyroscope-imu-udev/
 │   │       └── suspend-wake/
+│   ├── ps5-ubuntu/
+│   │   └── fixes/
+│   │       └── dualsense-bt-disconnect/
 │   └── steam-deck/
 │       └── fixes/            # (future)
 └── docs/

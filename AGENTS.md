@@ -4,7 +4,7 @@ This repository stores **tools and fixes** for handheld PCs (Steam Deck, Lenovo 
 
 ## How to work here
 
-1. Identify the **device** (`devices/legion-go-2`, `devices/steam-deck`, …).
+1. Identify the **device** (`devices/legion-go-2`, `devices/ps5-ubuntu`, `devices/steam-deck`, …).
 2. Prefer extending an existing fix folder over creating ad-hoc scripts in `$HOME/Downloads`.
 3. Every fix folder should contain at least:
    - a runnable script or clear manual steps
