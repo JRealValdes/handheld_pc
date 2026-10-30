@@ -20,7 +20,8 @@ handheld_pc/
 │   ├── legion-go-2/
 │   │   └── fixes/
 │   │       ├── gyroscope-imu-udev/
-│   │       └── suspend-wake/
+│   │       ├── suspend-wake/
+│   │       └── resume-gamepad/
 │   ├── ps5-ubuntu/
 │   │   └── fixes/
 │   │       └── dualsense-bt-disconnect/

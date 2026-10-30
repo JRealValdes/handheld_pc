@@ -14,6 +14,7 @@ This repository stores **tools and fixes** for handheld PCs (Steam Deck, Lenovo 
 ## When the user reports a regression
 
 1. Read the device fix `KNOWLEDGE.md` before inventing a new theory.
+   Legion Go 2, game controls dead after resume while the Steam UI still works (sticks included): `devices/legion-go-2/fixes/resume-gamepad/KNOWLEDGE.md` §0. The user will give a clock time. Run `trace-legion-go2-resume-gamepad.sh find <HH:MM>`. Do not use only `LATEST`.
 2. Run the fix script if one exists; if it fails, use its debug dump.
 3. Do **not** reinstall custom InputPlumber binaries or set `GYRO_GAIN` multipliers unless stock paths are proven broken *and* documented.
 
