@@ -2,7 +2,7 @@
 
 Durable context for an intermittent SteamOS s2idle failure on the Legion Go 2. Distinct from gyro ([gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md)).
 
-**Status (2026-08-07):** Open root cause. **Provisional mitigation + diagnostics installed** via [`debug-legion-go2-suspend.sh`](debug-legion-go2-suspend.sh) → `/usr/lib/systemd/system-sleep/legion-go2-suspend-debug`.
+**Status (2026-10-30):** Open root cause. **Per-suspend debug dumps are off** on this machine (hook under `/usr` was wiped by a SteamOS update; not reinstalled with dumps). Script default is now **settle-only** if reinstalled; use `install-hook --debug` only when hunting a recurrence.
 
 **Scope of truth:** User-observed behavior + on-device journal/dumps. Revise when diagnosis advances.
 
@@ -10,22 +10,20 @@ Durable context for an intermittent SteamOS s2idle failure on the Legion Go 2. D
 
 ## 0. Current deployed state (what is on the machine)
 
-| Piece | Role | Confirmed fix? |
+| Piece | Role | On device now? |
 |-------|------|----------------|
-| systemd-sleep hook under **`/usr/lib/systemd/system-sleep/`** | Runs on every suspend/resume | N/A (tooling) |
-| **Pre dump** then **`SETTLE_MS` sleep (default 1000 ms)** then kernel suspend | Provisional mitigation **if** bug is a settle race | **No** — hypothesis only |
-| Pre/post dumps + `hook-trail.log` + `logger -t legion-go2-suspend` | Evidence if stuck returns | Diagnostics |
-| `./debug-legion-go2-suspend.sh postmortem` | After hard power-off: find boots ending at `suspend entry` | Diagnostics |
+| systemd-sleep hook under `/usr/lib/systemd/system-sleep/` | Optional | **Absent** after OS update (2026-10); `steamos-readonly` enabled again |
+| Settle `SETTLE_MS` (default 1000 ms) | Provisional race mitigation | Not running until `install-hook` |
+| Pre/post dumps + trail | Evidence if stuck returns | **Off** (default). Enable with `install-hook --debug` |
+| `./debug-legion-go2-suspend.sh postmortem` | After hard power-off | Available anytime (on-demand) |
 
-**Intentional design:**
+**Intentional design (script):**
 
-1. **Dump first** (captures “racy” pre-state: inhibitors, USB, games, wakeups, uptime).
-2. **Then settle** (`sleep SETTLE_MS/1000`) so PM entry is delayed slightly.
-3. **On resume**, write a post dump (or absence of post after hard-off = stuck signature).
+1. **Default `install-hook`:** sleep `SETTLE_MS` only — no `find`, no journal scrapes, no dump files.
+2. **`install-hook --debug`:** dump first (racy pre-state), then settle; post dump on resume.
+3. SteamOS `systemd-sleep` only runs `/usr/lib/systemd/system-sleep/` (not `/etc`). Updates remount/replace `/usr` and **drop custom hooks** — reinstall after major updates if you still want settle.
 
-SteamOS `systemd-sleep` **only** executes `/usr/lib/systemd/system-sleep/` (not `/etc/...`). Install needs writable `/usr` (`steamos-readonly disable`).
-
-**What this is not:** not an EC quirk, not a gyro/InputPlumber change, not proof the race theory is correct. The 2026-08-04 21:44 stuck already had an earlier (dump-only) pre-hook — so “any hook” ≠ cure. Quiet periods also happen with intermittent bugs.
+**What this is not:** not an EC quirk, not a gyro/InputPlumber change, not a confirmed firmware fix. Quiet stretches without the hook also happen; do not treat absence of dumps as proof the race theory is wrong or right.
 
 ---
 
@@ -164,10 +162,11 @@ Artifacts under `~/legion-go2-suspend-debug/` and `/var/log/legion-go2-suspend/`
 ```bash
 cd devices/legion-go-2/fixes/suspend-wake
 ./debug-legion-go2-suspend.sh status
-./debug-legion-go2-suspend.sh install-hook          # settle 1000ms + dumps
+./debug-legion-go2-suspend.sh install-hook            # settle only (default)
+./debug-legion-go2-suspend.sh install-hook --debug    # dumps + settle
 SETTLE_MS=1500 ./debug-legion-go2-suspend.sh install-hook
-./debug-legion-go2-suspend.sh postmortem            # after stuck + hard-off
-./debug-legion-go2-suspend.sh uninstall-hook        # remove mitigation+dumps
+./debug-legion-go2-suspend.sh postmortem              # after stuck + hard-off
+./debug-legion-go2-suspend.sh uninstall-hook
 ```
 
 **If it fails again:**

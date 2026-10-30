@@ -10,13 +10,7 @@ Separate from [gyroscope-imu-udev](../gyroscope-imu-udev/).
 
 ## Status
 
-**Provisional mitigation + diagnostics** (not a confirmed root-cause fix). Full story in **[KNOWLEDGE.md](KNOWLEDGE.md)**.
-
-Installed hook (`install-hook`):
-
-1. Writes a **pre** dump (state useful if the next attempt sticks).
-2. Waits **`SETTLE_MS` (default 1000 ms)** before suspend entry — intentional settle if the bug is a race.
-3. Writes a **post** dump on successful resume (missing post ⇒ stuck signature).
+Root cause still open. Day-to-day: **no per-suspend debug dumps** (SteamOS updates also wipe `/usr` hooks). Optional **settle-only** hook if you want the 1s race mitigation without I/O. Full story in **[KNOWLEDGE.md](KNOWLEDGE.md)**.
 
 ## Expected vs buggy
 
@@ -24,17 +18,18 @@ Installed hook (`install-hook`):
 |------|---------|--------|
 | Suspend | LED → white blinking | LED stays red; warm |
 | Wake | Short press works | No response |
-| Journal / hook | `entry`…`exit`; pre+post | `entry` only; pre without post |
+| Journal | `entry`…`exit` | `entry` only until hard reboot |
 | Recovery | n/a | Long-press power |
 
 ## Commands
 
 ```bash
 chmod +x debug-legion-go2-suspend.sh
-./debug-legion-go2-suspend.sh install-hook                 # /usr/lib/… + 1s settle
-SETTLE_MS=1500 ./debug-legion-go2-suspend.sh install-hook  # stronger settle
-./debug-legion-go2-suspend.sh postmortem                   # after stuck + hard-off
-./debug-legion-go2-suspend.sh uninstall-hook
+./debug-legion-go2-suspend.sh status
+./debug-legion-go2-suspend.sh install-hook            # settle only (1s, no dumps)
+./debug-legion-go2-suspend.sh install-hook --debug    # dumps + settle (when hunting)
+./debug-legion-go2-suspend.sh uninstall-hook          # remove hook entirely
+./debug-legion-go2-suspend.sh postmortem              # after stuck + hard-off
 ```
 
-Dumps: `/var/log/legion-go2-suspend/` and `~/legion-go2-suspend-debug/`.
+Debug dumps (only with `--debug`): `/var/log/legion-go2-suspend/` and `~/legion-go2-suspend-debug/`.

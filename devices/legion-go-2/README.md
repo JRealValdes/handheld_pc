@@ -7,7 +7,7 @@ SteamOS handheld (DMI product `{83N0,83N1}`). Input stack: **InputPlumber** + **
 | Fix | Summary |
 |-----|---------|
 | [gyroscope-imu-udev](fixes/gyroscope-imu-udev/) | Gyro knowledge + fixes; script currently covers Case A (stock udev IMU attrs) |
-| [suspend-wake](fixes/suspend-wake/) | Open: s2idle stuck — provisional settle + debug dumps (see KNOWLEDGE) |
+| [suspend-wake](fixes/suspend-wake/) | Open: s2idle stuck — optional settle; dumps only with `--debug` |
 
 ## Official stack notes
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Legion Go 2 suspend/wake: provisional race settle + diagnostics (SteamOS).
+# Legion Go 2 suspend/wake: optional settle mitigation + on-demand diagnostics.
 #
-# Installs a systemd-sleep hook that:
-#   1) dumps pre/post suspend state (for the next stuck failure)
-#   2) waits SETTLE_MS before suspend entry (provisional mitigation if the
-#      bug is a settle race — NOT a confirmed root-cause fix)
+# Default install is settle-only (no per-suspend dumps). Use --debug when hunting
+# a recurrence. See KNOWLEDGE.md.
 #
-# See KNOWLEDGE.md. Usage:
+# Usage:
 #   ./debug-legion-go2-suspend.sh              # dump + postmortem check
 #   ./debug-legion-go2-suspend.sh dump
-#   ./debug-legion-go2-suspend.sh install-hook
+#   ./debug-legion-go2-suspend.sh install-hook           # settle only (default)
+#   ./debug-legion-go2-suspend.sh install-hook --debug   # settle + pre/post dumps
 #   ./debug-legion-go2-suspend.sh uninstall-hook
 #   ./debug-legion-go2-suspend.sh postmortem
 #   ./debug-legion-go2-suspend.sh status
@@ -24,6 +23,8 @@ DECK_HOME="${DECK_HOME:-${HOME:-/home/deck}}"
 FALLBACK_DIR="${DECK_HOME}/legion-go2-suspend-debug"
 # Provisional settle before PM suspend entry (milliseconds). Hypothesis: race.
 SETTLE_MS="${SETTLE_MS:-1000}"
+# install-hook mode: settle (default) | debug
+HOOK_MODE="${HOOK_MODE:-settle}"
 
 ERRORS=()
 WARNINGS=()
@@ -157,6 +158,12 @@ cmd_dump() {
 install_hook_file() {
   need_root "$@"
 
+  local mode="${HOOK_MODE:-settle}"
+  case "${1:-}" in
+    --debug|debug) mode=debug; shift || true ;;
+    --settle|settle) mode=settle; shift || true ;;
+  esac
+
   # /usr is usually read-only on SteamOS; unlock if needed.
   if command -v steamos-readonly >/dev/null 2>&1; then
     if steamos-readonly status 2>/dev/null | grep -qi 'enabled'; then
@@ -166,10 +173,6 @@ install_hook_file() {
   fi
 
   mkdir -p "$(dirname "$HOOK_PATH")"
-  mkdir -p "$LOG_DIR"
-  chmod 755 "$LOG_DIR"
-  mkdir -p "$FALLBACK_DIR"
-  chmod 777 "$FALLBACK_DIR" 2>/dev/null || true
 
   # Remove inert /etc copy from earlier installs (SteamOS systemd-sleep ignores it).
   if [[ -e "$LEGACY_HOOK_PATH" ]]; then
@@ -177,6 +180,49 @@ install_hook_file() {
     ok "Removed inert legacy hook: $LEGACY_HOOK_PATH"
   fi
 
+  if [[ "$mode" == "debug" ]]; then
+    mkdir -p "$LOG_DIR"
+    chmod 755 "$LOG_DIR"
+    mkdir -p "$FALLBACK_DIR"
+    chmod 777 "$FALLBACK_DIR" 2>/dev/null || true
+    _install_debug_hook
+  else
+    _install_settle_only_hook
+  fi
+
+  sed -i "s/^SETTLE_MS=.*/SETTLE_MS=${SETTLE_MS}/" "$HOOK_PATH"
+  if ! chmod 755 "$HOOK_PATH"; then
+    fail "Could not write $HOOK_PATH (is /usr writable? try: steamos-readonly disable)"
+    exit 1
+  fi
+  ok "Installed sleep hook: $HOOK_PATH (mode=$mode)"
+  ok "Provisional settle: ${SETTLE_MS}ms before suspend entry"
+  if [[ "$mode" == "debug" ]]; then
+    ok "Debug dumps enabled → $LOG_DIR and $FALLBACK_DIR"
+    log "After a stuck suspend + hard power-off, run: $0 postmortem"
+  else
+    ok "Debug dumps disabled (settle only). Re-enable with: $0 install-hook --debug"
+  fi
+}
+
+_install_settle_only_hook() {
+  cat >"$HOOK_PATH" <<'HOOK'
+#!/bin/bash
+# Auto-installed by debug-legion-go2-suspend.sh — settle only (no dumps).
+# Must live in /usr/lib/systemd/system-sleep/ on SteamOS (not /etc).
+SETTLE_MS=1000
+phase="${1:-unknown}"
+action="${2:-unknown}"
+if [ "$phase" = "pre" ] && [ "$action" = "suspend" ]; then
+  settle_sec="$(awk -v ms="$SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+  logger -t legion-go2-suspend "settle ${settle_sec}s before suspend entry"
+  sleep "$settle_sec" 2>/dev/null || sleep 1
+  logger -t legion-go2-suspend "settle done"
+fi
+HOOK
+}
+
+_install_debug_hook() {
   cat >"$HOOK_PATH" <<'HOOK'
 #!/bin/bash
 # Auto-installed by debug-legion-go2-suspend.sh
@@ -229,7 +275,6 @@ logger -t legion-go2-suspend "hook ${phase}/${action} starting settle_ms=${SETTL
     echo
 
     echo "----- power/wakeup=enabled (bounded 2s) -----"
-    # Device power/wakeup; class wakeup* often has no 'enable' attr on this kernel.
     timeout 2 find /sys/devices -path '*/power/wakeup' 2>/dev/null | while read -r f; do
       v="$(tr -d '\n' <"$f" 2>/dev/null || true)"
       [ "$v" = "enabled" ] || continue
@@ -276,7 +321,6 @@ echo "$(date -Is) $phase $action -> ${out} / ${out_home}" >>"${LOG_DIR}/hook-tra
 echo "$(date -Is) $phase $action -> ${out} / ${out_home}" >>"${HOME_DIR}/hook-trail.log" 2>/dev/null || true
 logger -t legion-go2-suspend "hook ${phase}/${action} wrote ${out_home}"
 
-# Dump first (captures racy pre-state), then provisional settle before PM entry.
 if [ "$phase" = "pre" ] && [ "$action" = "suspend" ]; then
   settle_sec="$(awk -v ms="$SETTLE_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
   logger -t legion-go2-suspend "settle ${settle_sec}s before suspend entry"
@@ -284,18 +328,6 @@ if [ "$phase" = "pre" ] && [ "$action" = "suspend" ]; then
   logger -t legion-go2-suspend "settle done"
 fi
 HOOK
-
-  # Bake the installer SETTLE_MS into the installed hook (default 1000).
-  sed -i "s/^SETTLE_MS=.*/SETTLE_MS=${SETTLE_MS}/" "$HOOK_PATH"
-
-  if ! chmod 755 "$HOOK_PATH"; then
-    fail "Could not write $HOOK_PATH (is /usr writable? try: steamos-readonly disable)"
-    exit 1
-  fi
-  ok "Installed sleep hook: $HOOK_PATH"
-  ok "Provisional settle: ${SETTLE_MS}ms before suspend entry"
-  ok "Dumps go to: $LOG_DIR and $FALLBACK_DIR"
-  log "After a stuck suspend + hard power-off, run: $0 postmortem"
 }
 
 uninstall_hook_file() {
@@ -326,6 +358,11 @@ cmd_status() {
   log "hook: $([[ -x "$HOOK_PATH" ]] && echo "installed ($HOOK_PATH)" || echo "not installed")"
   if [[ -x "$HOOK_PATH" ]]; then
     log "settle_ms: $(grep -E '^SETTLE_MS=' "$HOOK_PATH" 2>/dev/null | head -1 || echo '?')"
+    if grep -q 'PRE_SUSPEND_DUMP' "$HOOK_PATH" 2>/dev/null; then
+      log "hook_mode: debug (dumps on each suspend)"
+    else
+      log "hook_mode: settle-only (no dumps)"
+    fi
   fi
   log "log dir: $LOG_DIR $([[ -d "$LOG_DIR" ]] && echo "(exists)" || echo "(missing)")"
   if [[ -d "$LOG_DIR" ]]; then
@@ -442,10 +479,15 @@ cmd_all() {
   pm_path="$(cmd_postmortem | tail -1)"
   log ""
   if [[ ! -x "$HOOK_PATH" ]]; then
-    log "Tip: install the pre/post sleep hook so the next stuck attempt leaves a pre-dump:"
-    log "  $0 install-hook"
+    log "Tip: optional settle-only hook (no dumps): $0 install-hook"
+    log "     debug dumps + settle when hunting:   $0 install-hook --debug"
   else
     ok "Sleep hook already installed"
+    if grep -q 'settle only' "$HOOK_PATH" 2>/dev/null || ! grep -q 'PRE_SUSPEND_DUMP' "$HOOK_PATH" 2>/dev/null; then
+      log "Mode: settle-only (no per-suspend dumps)"
+    else
+      log "Mode: debug dumps enabled"
+    fi
   fi
   log ""
   log "Artifacts:"
@@ -464,15 +506,18 @@ Usage: $(basename "$0") [command]
 
   (default)       status + baseline dump + postmortem
   dump            write a one-shot state dump
-  install-hook    install /etc/systemd/system-sleep pre/post dump hook (pkexec)
+  install-hook [--settle|--debug]
+                  install /usr/lib systemd-sleep hook (pkexec)
+                  default/--settle: 1s delay only (no dumps)
+                  --debug:          dumps + settle (for recurrence hunts)
   uninstall-hook  remove that hook (pkexec)
   postmortem      scan prior boots for suspend entry without exit
   status          short status
   help            this text
 
-Dumps: $LOG_DIR and ~/legion-go2-suspend-debug
+Dumps (debug mode / manual): $LOG_DIR and ~/legion-go2-suspend-debug
 Hook path (SteamOS): $HOOK_PATH
-Provisional settle: ${SETTLE_MS}ms (override: SETTLE_MS=1500 $0 install-hook)
+SETTLE_MS default ${SETTLE_MS} (override: SETTLE_MS=1500 $0 install-hook)
 EOF
 }
 
@@ -487,6 +532,7 @@ main() {
       cmd_dump "${1:-manual}"
       ;;
     install-hook)
+      shift || true
       install_hook_file "$@"
       ;;
     uninstall-hook)
