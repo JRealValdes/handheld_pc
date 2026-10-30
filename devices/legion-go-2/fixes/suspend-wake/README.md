@@ -2,22 +2,39 @@
 
 ## Symptom
 
-Sometimes the Legion Go 2 appears to suspend (screen off) but does **not** enter real sleep: power-button LED stays solid red, the unit keeps producing heat, and a short power-button press does not wake it. Only a long-press forced power-off recovers the device.
+Sometimes the Legion Go 2 appears to suspend (screen off) but does **not** reach a wakeable low-power state: power-button LED stays solid red, heat continues, short power press does nothing. Recovery: long-press hard power-off.
 
-This is **separate** from the [gyroscope-imu-udev](../gyroscope-imu-udev/) issue.
+Journal on stuck boots ends at `PM: suspend entry (s2idle)` with **no** `PM: suspend exit`.
+
+Separate from [gyroscope-imu-udev](../gyroscope-imu-udev/).
 
 ## Status
 
-Open investigation — no fix script yet. Document symptoms and collect evidence in **[KNOWLEDGE.md](KNOWLEDGE.md)**.
+**Provisional mitigation + diagnostics** (not a confirmed root-cause fix). Full story in **[KNOWLEDGE.md](KNOWLEDGE.md)**.
 
-## Expected vs buggy behavior
+Installed hook (`install-hook`):
+
+1. Writes a **pre** dump (state useful if the next attempt sticks).
+2. Waits **`SETTLE_MS` (default 1000 ms)** before suspend entry — intentional settle if the bug is a race.
+3. Writes a **post** dump on successful resume (missing post ⇒ stuck signature).
+
+## Expected vs buggy
 
 | Step | Healthy | Buggy |
 |------|---------|--------|
-| Enter suspend (power menu or short power press) | Screen off; LED red → white blinking | Screen off; LED stays red; device still warm |
-| Wake (short power press) | Screen on; LED → red | No response; still red LED |
-| Recovery | n/a | Long-press power → forced off |
+| Suspend | LED → white blinking | LED stays red; warm |
+| Wake | Short press works | No response |
+| Journal / hook | `entry`…`exit`; pre+post | `entry` only; pre without post |
+| Recovery | n/a | Long-press power |
 
-## Next
+## Commands
 
-Capture logs / sleep state around a failed suspend (see KNOWLEDGE § Diagnostics). Do not invent overlays until a root cause is confirmed.
+```bash
+chmod +x debug-legion-go2-suspend.sh
+./debug-legion-go2-suspend.sh install-hook                 # /usr/lib/… + 1s settle
+SETTLE_MS=1500 ./debug-legion-go2-suspend.sh install-hook  # stronger settle
+./debug-legion-go2-suspend.sh postmortem                   # after stuck + hard-off
+./debug-legion-go2-suspend.sh uninstall-hook
+```
+
+Dumps: `/var/log/legion-go2-suspend/` and `~/legion-go2-suspend-debug/`.

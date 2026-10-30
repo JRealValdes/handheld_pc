@@ -1,102 +1,197 @@
 # Legion Go 2 — Suspend / wake stuck
 
-Durable context for a SteamOS suspend regression on the Legion Go 2. Distinct from gyro ([gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md)).
+Durable context for an intermittent SteamOS s2idle failure on the Legion Go 2. Distinct from gyro ([gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md)).
 
-**Status:** Open — symptoms reported; root cause unknown. Started after a SteamOS (or related stack) update; previously reliable.
+**Status (2026-08-07):** Open root cause. **Provisional mitigation + diagnostics installed** via [`debug-legion-go2-suspend.sh`](debug-legion-go2-suspend.sh) → `/usr/lib/systemd/system-sleep/legion-go2-suspend-debug`.
 
-**Scope of truth:** User-observed behavior only until reproduced with logs. Revise this file when diagnosis advances.
+**Scope of truth:** User-observed behavior + on-device journal/dumps. Revise when diagnosis advances.
+
+---
+
+## 0. Current deployed state (what is on the machine)
+
+| Piece | Role | Confirmed fix? |
+|-------|------|----------------|
+| systemd-sleep hook under **`/usr/lib/systemd/system-sleep/`** | Runs on every suspend/resume | N/A (tooling) |
+| **Pre dump** then **`SETTLE_MS` sleep (default 1000 ms)** then kernel suspend | Provisional mitigation **if** bug is a settle race | **No** — hypothesis only |
+| Pre/post dumps + `hook-trail.log` + `logger -t legion-go2-suspend` | Evidence if stuck returns | Diagnostics |
+| `./debug-legion-go2-suspend.sh postmortem` | After hard power-off: find boots ending at `suspend entry` | Diagnostics |
+
+**Intentional design:**
+
+1. **Dump first** (captures “racy” pre-state: inhibitors, USB, games, wakeups, uptime).
+2. **Then settle** (`sleep SETTLE_MS/1000`) so PM entry is delayed slightly.
+3. **On resume**, write a post dump (or absence of post after hard-off = stuck signature).
+
+SteamOS `systemd-sleep` **only** executes `/usr/lib/systemd/system-sleep/` (not `/etc/...`). Install needs writable `/usr` (`steamos-readonly disable`).
+
+**What this is not:** not an EC quirk, not a gyro/InputPlumber change, not proof the race theory is correct. The 2026-08-04 21:44 stuck already had an earlier (dump-only) pre-hook — so “any hook” ≠ cure. Quiet periods also happen with intermittent bugs.
 
 ---
 
 ## 1. Problem statement
 
-Intermittent failure to enter real system suspend. The UI path looks like sleep (display blanks), but hardware indicators show the machine never reached a proper low-power state. Wake via short power-button press then does nothing; recovery requires holding the power button until hard power-off.
+Intermittent failure around system suspend. UI looks like sleep (display blanks), but the device never reaches a proper low-power / wakeable state. Short power press does nothing; recovery is long-press hard power-off.
 
 ### Healthy flow
 
-1. Suspend via Steam power menu **or** short press on the power button.
-2. Display turns off.
-3. Power-button LED changes from **solid red** → **white blinking** (true sleep indicator on this device).
-4. Short press on power button wakes the device.
-5. LED returns to **solid red**; display comes back.
+1. Suspend via Steam power menu **or** short power-button press.
+2. Display off; LED **red → white blinking**.
+3. Short press wakes; LED → solid red.
 
 ### Buggy flow
 
-1. Same suspend trigger (power menu or short power press).
-2. Display turns off — looks like sleep from the UI.
-3. Power-button LED remains **solid red** (never white blinking).
-4. Device continues to generate heat (CPU/SoC still active or not fully gated).
-5. Short power press does nothing — no wake, LED still red.
-6. Only recovery: long-press power button → forced shutdown, then normal boot.
+1. Same trigger; display off.
+2. LED stays **solid red**; unit stays warm.
+3. Short press does nothing.
+4. Only long-press forced shutdown recovers.
 
 ---
 
-## 2. Observable signals (device-specific)
+## 2. Observable signals
 
-Use these as the primary “are we really asleep?” check on Legion Go 2:
-
-| Signal | Healthy suspend | Stuck / fake suspend |
-|--------|-----------------|----------------------|
+| Signal | Healthy | Stuck |
+|--------|---------|-------|
 | Display | Off | Off (misleading) |
-| Power LED | White blinking | Stays solid red |
-| Heat / fans | Cools / quiet | Still warm / active |
+| Power LED | White blinking | Solid red |
+| Heat | Cools | Still warm |
 | Short power press | Wakes | No effect |
-| Recovery | Soft wake | Hard power-off only |
+| Journal | `PM: suspend entry` … later `exit` | `entry` then **no** `exit` until next boot |
+| Hook trail | `pre` then `post` | `pre` only |
 
-The **LED color** is the fastest user-visible discriminator: if it never goes white-blinking after a suspend attempt, treat the session as the buggy case even before trying to wake.
-
----
-
-## 3. Triggers / notes from reports
-
-- Reproduced via **Steam power menu → Suspend** and via **short power-button press**.
-- Intermittent (not every suspend).
-- Regression after an update (exact SteamOS / kernel / firmware version TBD — fill in when known).
-- Not believed related to the gyro/IMU udev overlay; do not conflate diagnostics.
+LED is the fastest user check.
 
 ---
 
-## 4. Working hypotheses (unconfirmed)
+## 3. Environment snapshot (observed 2026-08-04)
 
-Do not treat these as root cause. Useful starting points for logs:
-
-1. **Suspend abort / failed transition** — userspace requests sleep; kernel or a wake source aborts; display blanked by compositor but system stays in S0 / “freeze” half-state.
-2. **Power-button / ACPI event mishandled** — button event consumed while stuck; subsequent short presses ignored until hard reset.
-3. **Firmware / EC LED vs OS sleep desync** — less likely if heat persists (that implies OS/SoC still active).
-4. **SteamOS / Gamescope / steamos-manager regression** post-update — sleep path changed; need journal around suspend attempt.
+| Item | Value |
+|------|-------|
+| SteamOS | `VERSION_ID=3.8.16`, `BUILD_ID=20260716.1` |
+| Kernel | `6.16.12-valve24.5-1-neptune-616-gb2f7cfe85e45` |
+| Suspend path | **s2idle only** (`/sys/power/mem_sleep` → `[s2idle]`) |
+| ACPI | **S0 S4 S5** (no classic S3) |
+| Valve quirk | `Using s2idle quirk to avoid Lenovo Legion Go 2 platform firmware bug` |
 
 ---
 
-## 5. Diagnostics to capture (when it happens next)
+## 4. Journal signature (confirmed)
 
-Prefer capturing **during or immediately after** a failed suspend (before hard power-off if possible via SSH from another machine). If SSH is unavailable, note SteamOS build and reproduce with logging enabled on a later attempt.
+Healthy and stuck look identical through freeze + entry:
 
-Checklist ideas (refine once tooling exists):
+1. Power key / menu → `The system will suspend now!`
+2. NetworkManager sleep / wlan unmanaged
+3. `Successfully froze unit 'user.slice'`
+4. (hook) pre dump ± settle
+5. `PM: suspend entry (s2idle)`
 
-```text
-- SteamOS version / build (steamos-version, uname -r)
-- journalctl from ~2 min before suspend attempt through hard recovery
-  Focus: suspend, resume, power button, ACPI, Gamescope, steam
-- /sys/power/state and last sleep transition messages
-- Whether wake sources or inhibitors blocked sleep
-- Power LED state observed (red vs white blinking) — always record
+**Healthy:** later `PM: suspend exit`.  
+**Stuck:** boot journal **ends** at entry; next boot is cold start after hard-off.
+
+This is not “Steam only blanked the panel.” Userspace reaches real suspend entry; s2idle / wake / EC leaves the unit unwakeable (red LED + heat).
+
+---
+
+## 5. Hypotheses (ranked, none confirmed)
+
+### H1 — Settle / race before s2idle (leading working theory)
+
+**What:** Entering s2idle while the platform is still settling (USB Legion controller re-enumerate, InputPlumber rebind, GPU/SMU resume, heavy game start) leaves firmware/EC or wake path in a bad state: OS thinks it suspended; LED never blinks white; short press cannot wake.
+
+**Why it fits:**
+
+- Intermittent on the same kernel/build (many OK cycles, rare stuck).
+- Incidents clustered around “dirty” moments: ~30s after wake with `17ef:61eb` reconnect + Shadows loading; or first suspend ~90s after reboot with Shadows just launched.
+- Same path works repeatedly when the machine has been idle/stable.
+- Valve already ships an s2idle quirk for this platform → firmware sleep is known-fragile.
+- Accidental long pre-hook work (`find /sys/...`) *might* have reduced rate by delaying entry — unproven; hence we now use an **explicit** `SETTLE_MS` instead of relying on slow dumps.
+
+**Why not proven:** Stuck still happened once with a dump-only pre-hook; no A/B with settle vs no settle yet; no kernel/EC smoking gun line unique to stuck boots.
+
+### H2 — s2idle “success” without real low power / EC sync
+
+**What:** Kernel reaches `suspend entry` but EC/LED/power rails never enter the white-blink sleep state; SoC stays partially active (heat).
+
+**Why:** Matches LED + heat while userspace is frozen. Overlaps H1 (race could cause this).
+
+### H3 — Wake IRQ / power-button path dead after bad entry
+
+**What:** Entry somehow succeeds; resume never starts on short press.
+
+**Why:** Matches “no wake until hard-off.” Hard to separate from H2 without more PM debug.
+
+### H4 — Residual firmware bug despite Valve quirk
+
+**What:** Quirk incomplete or conditional; still hit on some sequences.
+
+**Why:** Quirk present on both good and bad boots — not a discriminator by itself.
+
+### H5 — Ruled out / very unlikely
+
+- **Compositor-only blank:** contradicted by `PM: suspend entry` on stuck boots.
+- **Gyro / IMU udev overlay:** no evidence; separate stack; do not “fix” gyro for this.
+- **logind inhibitors blocking sleep:** stuck pre-dumps showed `No inhibitors`.
+- **“Debug hook alone fixed it”:** 21:44 failure already had pre-hook dumps; quiet days ≠ proof.
+
+---
+
+## 6. Documented incidents
+
+### 2026-08-04 ~20:05 — after AC Shadows + quick re-suspend
+
+- Boot `2c80abc6…`. Healthy sleep `19:57→20:05`, then USB controller disconnect/reconnect, InputPlumber errors/re-add, Shadows (`3159330`) resuming.
+- ~32s later: power → entry `20:05:39` → no exit → hard-off.
+- Hook was still wrongly under `/etc` then → **no pre dump**.
+
+### 2026-08-04 ~21:44 — first suspend after reboot (pre-hook captured)
+
+- Prior boot: many OK rapid suspends **with** Shadows + working pre/post hooks; clean reboot.
+- New boot `89e415a3…`: Shadows `21:42:59`; first suspend `21:44:05` → pre dump written → entry → **no post** → hard-off.
+- Pre ≈ last good pre (no inhibitors). Wake-source section empty (hook bug; class nodes lack `enable` — later fixed).
+- Takeaway: not “every Shadows suspend fails”; stuck as **first** suspend after reboot while game coming up.
+
+Artifacts under `~/legion-go2-suspend-debug/` and `/var/log/legion-go2-suspend/`.
+
+### 2026-08-07 — quiet stretch
+
+- Several days without recurrence after enriched dumps (and before explicit `SETTLE_MS`).
+- Recorded as **possible** rate drop from added latency; **not** accepted as root-cause fix. Explicit settle added so mitigation is intentional and tunable.
+
+---
+
+## 7. Tooling / ops
+
+```bash
+cd devices/legion-go-2/fixes/suspend-wake
+./debug-legion-go2-suspend.sh status
+./debug-legion-go2-suspend.sh install-hook          # settle 1000ms + dumps
+SETTLE_MS=1500 ./debug-legion-go2-suspend.sh install-hook
+./debug-legion-go2-suspend.sh postmortem            # after stuck + hard-off
+./debug-legion-go2-suspend.sh uninstall-hook        # remove mitigation+dumps
 ```
 
-A future `debug-legion-go2-suspend.sh` (or similar) can dump this; do not invent a “fix” overlay until a cause is confirmed.
+**If it fails again:**
+
+1. Note LED (red vs white blink), game, charging, dock, seconds since last wake/boot.
+2. Hard power-off → boot → `./debug-legion-go2-suspend.sh postmortem`.
+3. Keep `pre-suspend-*` (no matching `post`), `hook-trail.log`, journal boot that ends at `suspend entry`.
+4. Check journal for `legion-go2-suspend` (`settle …` / `settle done`) — confirms settle ran before entry.
+
+**A/B idea (later):** `SETTLE_MS=0` reinstall vs `1000` to see if stucks return — only way to strengthen H1.
 
 ---
 
-## 6. Anti-patterns
+## 8. Anti-patterns
 
-- Treating blank screen alone as proof of successful suspend (LED + heat matter).
-- Blaming or “fixing” gyro / InputPlumber / IMU udev for this symptom without evidence.
-- Shipping speculative systemd oneshots or EC quirks before journal proof.
-- Assuming every failed wake is the same bug — document variants if LED *does* blink but wake still fails.
+- Blank screen alone ≠ successful suspend.
+- Blaming gyro/InputPlumber/IMU udev without evidence.
+- Shipping EC quirks or custom InputPlumber binaries for this without journal proof.
+- Installing hooks only under `/etc/systemd/system-sleep/` on SteamOS (ignored).
+- Declaring the bug “fixed” because it went quiet.
+- Expecting SSH while stuck (wlan asleep, user.slice frozen).
 
 ---
 
-## 7. Documented failure cases
+## 9. Confirmed root-cause cases
 
-Add a subsection when a root cause is confirmed.
-
-*(None yet.)*
+*(None yet. Provisional settle is mitigation-under-hypothesis, not a closed case.)*
