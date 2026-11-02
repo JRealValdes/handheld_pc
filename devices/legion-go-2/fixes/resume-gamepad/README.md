@@ -8,25 +8,37 @@ This is not the [suspend-wake](../suspend-wake/) stuck-sleep bug. Here the machi
 
 ## Status
 
-Open. One desktop resume on 2026-10-30 already showed Steam failing to reopen the virtual pad while the keyboard target stayed usable. Not yet captured mid-game. Full notes in **[KNOWLEDGE.md](KNOWLEDGE.md)**.
+Open. H1/H2 (dead pad after resume) and stuck RB/R1 after resume are documented in **[KNOWLEDGE.md](KNOWLEDGE.md)**. The watcher is already installed on this machine.
 
-## Capture
+## When it fails (you)
 
-Install once (polkit prompt). Every suspend then writes its own directory. The last 20 are kept. Switching to Desktop is not a suspend and does not delete them.
+Do **not** run scripts in Gaming mode. Do **not** need `nudge` yourself.
+
+1. Note the **clock time** (24h) when it went bad.
+2. Note the symptom in one line, e.g. “mando muerto en el juego, UI Steam OK” / “UI Steam también muerta” / “RB fantasma; toqué RB y [sí/no] soltó”.
+3. Switch to **Desktop** and say that here in chat.
+
+The agent recovers `~/legion-go2-resume-gamepad/cycles/…` with `find "HH:MM"` and digs. Going to Desktop is fine: it does not delete those dumps (it is not a suspend). Leaving the game may clear a live stuck-RB state; the resume cycle + your note are still enough to investigate.
+
+## Capture (install / agent)
+
+Install once if needed (polkit). Last 20 cycles kept.
 
 ```bash
 cd "devices/legion-go-2/fixes/resume-gamepad"
-chmod +x trace-legion-go2-resume-gamepad.sh
 ./trace-legion-go2-resume-gamepad.sh install
 ```
 
-After a bad in-game resume, switch to Desktop and report the **resume clock time** (24h). Look that cycle up; do not assume the newest directory is the one:
+Agent lookup (not for you unless you want):
 
 ```bash
 ./trace-legion-go2-resume-gamepad.sh find "21:40"
 ```
 
-Steam may rotate its own logs when Desktop starts. Copies taken at resume are already in the cycle (`steam-post-0s-*`, `steam-post-15s-*`). Index: `~/legion-go2-resume-gamepad/index.txt`.
+On each resume the watcher auto-repairs two known breaks (see cycle `nudge.log`):
+
+1. Sealed deck-uhid hidraw (`28de:12fb` mode `000`) → chmod/ACL + bounce `deck-uhid`.
+2. One `touch` on `Microsoft X-Box 360 pad 0` so Proton retries open.
 
 ## Remove
 

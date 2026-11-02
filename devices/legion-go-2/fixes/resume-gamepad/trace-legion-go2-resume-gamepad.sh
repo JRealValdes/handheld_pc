@@ -427,6 +427,103 @@ cmd_mark() {
   fi
 }
 
+# Two post-resume breaks share this helper:
+# H1 — deck-uhid hidraw (28de:12fb) stays mode 000; Steam logs Unable to open
+#      and never creates "Microsoft X-Box 360 pad 0". Steam UI sticks die too.
+# H2 — Steam opens hidraw OK; Proton misses IN_ATTRIB on the new 360 pad.
+#
+# Fix H1 first (ACL + optional target bounce). Then touch the 360 pad for H2.
+# Must run ASAP after resume: Steam tried hidraw at +3s on the overnight cycle.
+repair_after_resume() {
+  local dir="$1" tag="${2:-manual}"
+  local log="${dir}/nudge.log"
+  local h name node mode mask fixed=0 bounced=0 found_360=0
+  local ev base access group_read
+  {
+    echo "===== repair ${tag} $(date -Is) ====="
+
+    shopt -s nullglob
+    for h in /sys/class/hidraw/hidraw*; do
+      grep -q '000012FB' "$h/device/uevent" 2>/dev/null || continue
+      name="$(basename "$h")"
+      node="/dev/${name}"
+      mode="$(stat -c '%a' "$node" 2>/dev/null || echo '?')"
+      mask="$(getfacl -p "$node" 2>/dev/null | awk -F: '/^mask:/{print $3; exit}')"
+      echo "deck_hidraw=${node} mode=${mode} mask=${mask:-?}"
+      if [[ "$mode" == "0" || "$mode" == "000" || "$mask" == "---" ]]; then
+        if chmod 0660 "$node" 2>/dev/null; then
+          echo "chmod 0660 ${node}"
+          fixed=1
+        else
+          echo "chmod failed on ${node}"
+        fi
+        if command -v setfacl >/dev/null 2>&1; then
+          setfacl -m u:deck:rw,m:rw "$node" 2>/dev/null && echo "setfacl u:deck:rw ${node}" || echo "setfacl failed"
+        fi
+        touch -c "$node" 2>/dev/null || true
+        mode="$(stat -c '%a' "$node" 2>/dev/null || echo '?')"
+        echo "deck_hidraw_after mode=${mode}"
+      else
+        echo "deck_hidraw already openable"
+      fi
+    done
+
+    # If the node was sealed when Steam first saw it, Steam does not retry.
+    # Bounce deck-uhid so udev/Steam get a new Local Device Found.
+    if [[ "$fixed" -eq 1 ]] && command -v inputplumber >/dev/null 2>&1; then
+      echo "bouncing deck-uhid targets (force Steam rediscovery)"
+      if inputplumber device 0 targets set keyboard mouse >/dev/null 2>&1; then
+        sleep 0.3
+        if inputplumber device 0 targets set deck-uhid keyboard mouse >/dev/null 2>&1; then
+          bounced=1
+          echo "targets set deck-uhid keyboard mouse"
+        else
+          echo "targets set deck-uhid failed; restoring"
+          inputplumber device 0 targets set deck-uhid keyboard mouse >/dev/null 2>&1 || true
+        fi
+      else
+        echo "targets set keyboard mouse failed"
+      fi
+    fi
+
+    # Touch the 360 pad at most once per resume cycle. Repeating IN_ATTRIB
+    # while wine already holds the node is unnecessary and was a suspect for
+    # latched buttons after the 2026-11-02 01:05 resume.
+    local touched_marker="${dir}/.touched-xinput360"
+    for ev in /sys/class/input/event*/device/name; do
+      name="$(tr -d '\n' <"$ev" 2>/dev/null || true)"
+      [[ "$name" == "Microsoft X-Box 360 pad 0" ]] || continue
+      found_360=1
+      base="$(basename "$(dirname "$(dirname "$ev")")")"
+      node="/dev/input/${base}"
+      access="$(stat -c '%A' "$node" 2>/dev/null || echo '?')"
+      group_read="${access:4:1}"
+      echo "xinput360=${node} mode=${access}"
+      if [[ -e "$touched_marker" ]]; then
+        echo "skip touch: already nudged this cycle"
+        continue
+      fi
+      if [[ "$group_read" != "r" && "${access:7:1}" != "r" ]]; then
+        echo "skip touch: not readable yet"
+        continue
+      fi
+      if touch -c "$node"; then
+        echo "touched ${node} (inotify IN_ATTRIB for Proton winebus)"
+        : >"$touched_marker"
+        publish_tree "$touched_marker"
+      else
+        echo "touch failed on ${node}"
+      fi
+    done
+    shopt -u nullglob
+
+    [[ "$found_360" -eq 1 ]] || echo "no Microsoft X-Box 360 pad 0"
+    echo "fixed_acl=${fixed} bounced=${bounced} xinput360=${found_360}"
+  } >>"$log" 2>&1
+  publish_tree "$log"
+  logger -t legion-go2-resume-gamepad "repair ${tag} fixed=${fixed} bounce=${bounced} ${dir}"
+}
+
 on_pre() {
   local dir
   dir="$(new_cycle suspend)"
@@ -445,18 +542,26 @@ on_post() {
     dir="$(new_cycle resume-only)"
     date +%s >"${dir}/pre.epoch"
   fi
-  # Clock time first, then Steam tails, before the slower sysfs dump.
-  # Game Mode → Desktop is not a suspend; it must not be required for these files.
+  # Clock + fast repair before the slow dump. Steam tried hidraw at +3s
+  # after the overnight cycle; a 30s snapshot first is too late.
   note_event "$dir" resume
+  repair_after_resume "$dir" "t+0s"
   copy_steam_tails "$dir" post-0s
   write_snapshot "${dir}/post-0s.txt" "post-0s"
   publish_tree "$dir"
   logger -t legion-go2-resume-gamepad "post-0s ${dir}"
   # Delayed dumps run outside the read loop so busctl keeps listening.
   (
-    sleep 5
+    sleep 1
+    repair_after_resume "$dir" "t+1s"
+    sleep 2
+    repair_after_resume "$dir" "t+3s"
+    sleep 2
     write_snapshot "${dir}/post-5s.txt" "post-5s"
-    sleep 10
+    repair_after_resume "$dir" "t+5s"
+    sleep 5
+    repair_after_resume "$dir" "t+10s"
+    sleep 5
     write_snapshot "${dir}/post-15s.txt" "post-15s"
     copy_steam_tails "$dir" post-15s
     collect_logs "$dir"
@@ -602,6 +707,7 @@ Usage: $(basename "$0") [command]
   uninstall         remove that service (pkexec); keeps dumps
   find [HH:MM]      show the cycle for that local time (24h). No arg: recent index
   status            show service and latest dump
+  nudge             run repair once now (agent/Desktop; log in manual-nudge/)
   help              this text
 
 Dumps: ${BASE_DIR}/cycles/cycle-*/  (last ${KEEP_CYCLES} kept)
@@ -621,6 +727,12 @@ main() {
     uninstall) uninstall_unit ;;
     status) cmd_status ;;
     find) cmd_find "$@" ;;
+    nudge)
+      ensure_dirs
+      mkdir -p "${BASE_DIR}/manual-nudge"
+      repair_after_resume "${BASE_DIR}/manual-nudge" "manual"
+      ok "Repair log: ${BASE_DIR}/manual-nudge/nudge.log"
+      ;;
     help|-h|--help) usage ;;
     *)
       warn "Unknown command: $cmd"

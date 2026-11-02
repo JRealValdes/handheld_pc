@@ -4,18 +4,26 @@ Durable context for: suspend in **Gaming mode with a game open**, resume succeed
 
 Distinct from [suspend-wake](../suspend-wake/KNOWLEDGE.md) (machine never finishes s2idle) and from [gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md).
 
-**Status (2026-10-30):** Open. The in-game case is not captured yet. A Desktop resume the same day is a different observation (see §3) and is not this bug. Watcher keeps the last 20 suspends; look them up by clock time.
+**Status (2026-11-02, after 01:05):** Open. H1 and H2 confirmed earlier. The 01:05 overnight resume recovered the pad (Steam opened `hidraw9`, Proton held `event16`). A few minutes later the game acted as if **RB/R1 was held**. See §3.
 
 **Scope of truth:** This machine. SteamOS `3.9.5` / `BUILD_ID=20261023.100`, kernel `7.2.7-valve2-2-neptune-72-g31504582a073`, `inputplumber 0.78.0`, DMI `83N0`, USB `17ef:61eb`. User report below is what they have seen several times in Gaming mode.
 
 ---
 
-## 0. When the user reports a bad resume at a clock time
+## 0. When the user reports a bad resume (Desktop chat)
 
-They will switch to Desktop and say the resume went bad at a local time (24h, e.g. `21:40`). Do this before theorising:
+**User does almost nothing in-game.** Agreed flow: note clock time + one-line symptom → switch to Desktop → tell the agent here. They should not run `nudge` / `evtest` in Gaming mode.
 
-1. Read this file. The reported bug is **game dead, Steam UI alive including sticks**.
-2. Confirm the watcher is running: `systemctl is-active legion-go2-resume-gamepad-trace.service`.
+Symptoms they may report:
+
+- Game pad dead, Steam UI sticks still work → classic H2 path (or partial recovery).
+- Steam UI sticks dead too → H1 path.
+- Character attacks alone / RB-R1 held → stuck button (§3 01:05). Ask/record whether tapping RB cleared it if they already tried; do not send them back into the game for it.
+
+**Agent checklist (you run these):**
+
+1. Read this file.
+2. `systemctl is-active legion-go2-resume-gamepad-trace.service`.
 3. Find that resume, not whichever cycle is newest:
 
 ```bash
@@ -23,12 +31,13 @@ cd "devices/legion-go-2/fixes/resume-gamepad"
 ./trace-legion-go2-resume-gamepad.sh find "21:40"
 ```
 
-Replace `21:40` with the time they gave. Match the `resume` line. `LATEST` may be a later suspend or a manual snapshot.
+Replace `21:40` with the time they gave. Match the `resume` line. `LATEST` may be a later suspend, a Desktop session, or a service restart.
 
-4. In that cycle directory, read `summary.txt`, then `post-0s.txt` / `post-15s.txt` signals, `steam-post-0s-controller.txt`, `steam-post-15s-controller.txt`, `steam-*-controller_ui.txt`, `journal-inputplumber.txt`, and the open-fd section of `post-15s.txt`.
-5. Decide using §4. Record the conclusion back into §3. Do not restart InputPlumber or change targets until that cycle is read.
+4. In that cycle: `summary.txt`, `nudge.log`, `post-0s.txt` / `post-5s.txt` / `post-15s.txt` (signals + open fds), `steam-post-*-controller.txt`, `steam-*-controller_ui.txt`, `journal-inputplumber.txt`.
+5. Decide with §4 (dead pad) or stuck-button notes in §3. Record back into §3. Do not restart InputPlumber or change targets until that cycle is read.
+6. Optional live checks on Desktop only if still useful: `./trace-….sh status`, `snapshot`, `nudge` (writes `~/legion-go2-resume-gamepad/manual-nudge/`), or `evtest --query` on the current 360 pad — knowing the game may already be gone and a stuck RB may have cleared.
 
-Switching Gaming mode → Desktop is **not** a suspend. It does not create a cycle and it does not delete old ones (`~/legion-go2-resume-gamepad/cycles/`, last 20, plus append-only `~/legion-go2-resume-gamepad/index.txt`). Steam itself may rotate `controller.txt` when Desktop starts; the cycle dir already holds copies taken at resume (`steam-post-0s-*` immediately, `steam-post-15s-*` fifteen seconds later). Read those copies, not only the live Steam log.
+Switching Gaming → Desktop is **not** a suspend. It does not create a cycle and does not delete old ones (`~/legion-go2-resume-gamepad/cycles/`, last 20, plus `index.txt`). Steam may rotate live `controller.txt` on Desktop; prefer the cycle copies (`steam-post-0s-*`, `steam-post-15s-*`).
 
 If `find` shows nothing, the service was not running for that suspend. Say so. Do not invent a cycle.
 
@@ -103,30 +112,98 @@ Not an in-game reproduction. Cursor / `kwin_wayland` were up. Steam client staye
 
 So after this resume the virtual pad node exists, root InputPlumber can feed it, and the logged-in user (Steam) cannot open it. The keyboard target the home button uses is unaffected.
 
+### 2026-10-30 17:23 → 18:51 — Crimson Desert, Gaming mode (the reported bug)
+
+Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261030-172350`. Suspend 17:23:50, resume 18:51:30. Game mode, `gamescope` up, scope `app-steam-app3321460-3877` (**Crimson Desert Enhanced**). User pressed the guide button several times in the first 30s (Steam UI ↔ game).
+
+**Reject H1 for this cycle.** At 18:51:32 Steam logs `Steam controller device opened for index 15` on `/dev/hidraw9`. `post-5s` shows `hidraw9` mode `660`, ACL mask `rw`, and `steam` pid 2414 holding it. No `Unable to open`.
+
+**Config reload happened.** `controller_ui`: `Controller 15 disconnected` at 18:51:29, `connected` at 18:51:32, then `Loaded Config` for app **3321460** (the game), not only for the client UI. Focus returns to the game at 18:51:50, 18:51:54, and 18:52:01, each time reloading that app’s config. Guide events reach the UI (`Guide button sent to JS`).
+
+**The game’s XInput node was replaced and left unopened.**
+
+| | Before suspend (`pre.txt`) | +5s (`post-5s.txt`) |
+|--|----------------------------|---------------------|
+| Steam virtual pad | `Microsoft X-Box 360 pad 0` (`28de:11ff`) `event17` `js1` `input23` | same name, `event16` `js1` `input32` |
+| Who holds it | (fd scan skipped on pre) | **no process** holds `event16` or `js1` |
+| Who holds deck hidraw | | `steam` holds `hidraw9` |
+
+`js1` kept the same number; the event node and sysfs id did not. Proton reads this 360 pad, not `hidraw9`. Steam UI reads `hidraw9`. That split matches sticks alive in the Steam UI and dead in the game, including after the overlay was opened and closed.
+
+InputPlumber did recreate the composite device and then logged `Gamepad order: []` after the switch to `deck-uhid`. Steam still opened `hidraw9` and fed the UI, so an empty order did not remove the pad Steam uses.
+
+At 18:52:14 the game-mode Steam client exits (`Exiting workitem thread`). 18:52:23 is a new client on the Desktop config (`413080`). That is the user leaving Game Mode, not a second suspend.
+
+### 2026-10-30 19:16 → 2026-10-31 16:04 — overnight, Gaming mode, Steam UI also dead
+
+Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261030-191631`. Suspend 19:16:31, resume 16:04:34 (~21h asleep). Crimson Desert still in scope. User: game dead **and** SteamOS UI did not respond.
+
+**This is H1, not H2.**
+
+| Time | What |
+|------|------|
+| 16:04:33 | Steam: `Turn off idle controller 15`, `hid_read failure`, PollState → 0. UI: `Controller 15 disconnected`. |
+| 16:04:35–36 | InputPlumber rebuilds composite; briefly targets `xbox-elite`, then `deck-uhid`. |
+| 16:04:36 | Steam opens **Xbox One Elite 2** as controller **0**, then immediate `hid_read failure` / disconnect. |
+| 16:04:37 | Steam finds `Legion Go 2 Controller` on `/dev/hidraw4` → **`Unable to open local device: /dev/hidraw4`**. No later `device opened` for index 15 while still in Game Mode. |
+| +5s / +10s | `nudge.log`: **no** `Microsoft X-Box 360 pad 0` (Steam never created it). |
+| post-0s / post-5s | `DECK_HIDRAW=hidraw4` mode `000`, ACL mask `---`. Keyboard target `event19` still `660`. |
+| 16:06 | User left Game Mode; Steam client restart; hidraw becomes openable; controller 15 connects. |
+
+The Proton `touch` on the 360 pad cannot help: that node never appears when Steam fails the hidraw open. The overnight cycle matches the Desktop 16:20 observation, now confirmed with “Steam UI sticks dead”.
+
+Watcher change after this cycle: repair ACL on `28de:12fb` immediately at resume (+0/+1/+3/+5/+10s) and bounce `deck-uhid` if it had to chmod, so Steam gets a new `Local Device Found` after the node is openable. Still unverified.
+
+### 2026-11-02 01:05 — overnight resume, pad recovered, then stuck RB/R1
+
+Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261031-162123`. Suspend 2026-10-31 16:21, resume **01:05:53**. Crimson Desert still running.
+
+**Pad recovery looked healthy (not H1):**
+
+| Time | What |
+|------|------|
+| 01:05:52 | Steam closes controller 15 (`hid_read failure`). |
+| 01:05:55 | Steam opens `/dev/hidraw9` index 15. ACL already `660` / mask `rw`. No `Unable to open`. |
+| 01:05:55 | UI loads config for app **3321460**. |
+| 01:06:09–10 | Guide → Steam UI → back to game. |
+| t+1s… | `nudge.log`: 360 pad `event16` present; touched four times (01:06:15, :17, :45, :50). No ACL fix, no target bounce. |
+| ~01:07 (post-15s) | `winedevice.exe` holds `/dev/input/event16`. Game process `CrimsonDesert.e` alive. |
+
+User: controls felt slow to come back, then worked; **a few minutes later** the character attacked continuously as if holding R1/RB. At **01:08:37** Guide → Steam UI again; **01:08:53** Game Mode Steam exits (switch toward Desktop).
+
+**Stuck-button read:**
+
+- Not H1: hidraw was openable and Steam held it.
+- Proton attach was delayed: `post-0s` (~01:06:14) had no process on the 360 pad; by `post-5s` (~01:06:45) `winedevice` held `event16`. Matches the slow “controls came back” feeling and the H2 winebus/inotify path.
+- Repair touched `event16` **four** times (01:06:15, :17, :45, :50), including after wine already owned the fd.
+- No second USB drop or Steam `Unable to open` between 01:06 and 01:08. Next Steam UI activity is Guide at **01:08:37** (user escaping), then Desktop ~01:09.
+- Logs do not record which digital button was high; the watcher had no button-state capture yet.
+- Best fit: Steam Input / Proton **latched a digital button** (RB/R1) across the XInput reattach and/or the 01:06:09–10 overlay↔game focus flip — not a dead pad.
+- **User (2026-11-02):** stuck RB also happened **before** this watcher existed. That demotes the multi-`touch` theory from cause to optional aggravator. Root is likely in the stock resume path (Steam Input / Proton / game), not introduced by the hook. Repair still touches the 360 pad **once** per cycle (enough for H2; no need to repeat).
+
+**If it happens again:** note whether tapping RB once clears it (classic latch) or it stays down with no physical press (synthetic hold). Capture `EVIOCGKEY` / `evtest --query` on the 360 pad while stuck.
+
 ---
 
 ## 4. Hypotheses (ranked for the Gaming-mode report)
 
-### H2 — Steam UI rebinds, the running game does not (leading)
+### H2 — Running game does not open the recreated XInput pad (supported by 18:51)
 
-**What:** Suspend drops controller 15. On resume Steam opens the new deck-uhid and configures it for the Steam UI. The game that was already running keeps the old slot (Steam Input config not reloaded for that appid, or Proton/XInput still bound to the device node that vanished).
+**What:** Suspend destroys `Microsoft X-Box 360 pad 0` (Steam’s XInput evdev, `28de:11ff`). Resume creates a new one. Steam reopens `hidraw` `28de:12fb`, reloads the game’s controller config, and the Steam UI works. The already-running game never opens the new `event*` / `js*` node.
 
-**Why it fits the report:** Sticks work in the Steam UI after the bad resume, and do not work in the game. That requires a live gamepad path into Steam. It does not require the game process to have reopened anything.
+**18:51 result:** Supported. Config reload for app 3321460 happened, `hidraw9` was openable and held by `steam`, and no process held the new 360 pad (`event16` `js1`). Opening the overlay and returning to the game did not attach it. Quitting and relaunching the game does (user, other incidents). “Config never reloaded” is the branch this cycle rules out.
 
-**What the cycle should show:**
+**Why the running game stays detached:** Crimson Desert is Proton 11. Proton’s `winebus` inside the pressure-vessel container does not trust udevd; it watches `/dev/input` with inotify (`IN_CREATE` + `IN_ATTRIB`). On create it `open()`s the new `event*` node. If that open fails because the node is not readable yet, it waits for a later attribute change and tries again. If that attribute event is missed, wine never opens the recreated `Microsoft X-Box 360 pad 0`. A new process enumerates `/dev/input` from scratch, which is why relaunch works and the overlay does not.
 
-- `steam-post-0s-controller.txt` or `steam-post-15s-controller.txt`: `device opened` after the `hid_read failure` (not only `Unable to open`).
-- `steam-*-controller_ui.txt`: `Controller 15 disconnected` then `connected`, and a config load for the client UI / `basicui`.
-- The game appid from `pre` (`OnFocusWindowChanged` / transient `app-steam-app*`) does **not** get a new `Loaded Config` after `resume`.
-- `post-15s.txt` open fds: the game (or `steam`) holding a `(deleted)` hidraw or js node, with a new hidraw present.
+The watcher `touch`es that 360-pad node after resume (`IN_ATTRIB` for winebus). Useful only when Steam already opened deck-uhid (H2). Unverified as a full fix.
 
-### H1 — Steam never reopens deck-uhid (seen on Desktop, poor fit for this report)
+### H1 — Steam cannot open deck-uhid hidraw (confirmed 16:04 overnight + Desktop 16:20)
 
-**What:** USB drop closes controller 15. The new `/dev/hidraw*` stays mode `000` / ACL mask `---`, Steam logs `Unable to open`, and never retries.
+**What:** USB drop closes controller 15. InputPlumber recreates `28de:12fb`, but `/dev/hidraw*` stays mode `000` / ACL mask `---`. Steam logs `Unable to open` and does not retry. No `Microsoft X-Box 360 pad 0`. Steam UI sticks and the game are both dead. The InputPlumber Keyboard target can still be openable (Legion/guide may still reach gamescope even when sticks do not).
 
-**Where it was seen:** §3, Desktop resume at 16:20, no game in front. Steam UI sticks were not checked.
+**Where confirmed:** Desktop 2026-10-30 16:20; Gaming overnight 2026-10-31 16:04 (`Unable to open /dev/hidraw4`, nudge saw no 360 pad).
 
-**Why it is a poor fit for the reported bug:** if Steam cannot open the hidraw, the Steam UI should not have working sticks either. Keep it only if a Gaming-mode cycle shows `Unable to open` and no later `device opened` **and** the user still says UI sticks worked.
+**Auto attempt:** chmod/setfacl the sealed hidraw as soon as it appears, then briefly set targets to `keyboard mouse` and back to `deck-uhid keyboard mouse` so Steam rediscovers an openable node. Not yet proven.
 
 ### H3 — Composite device comes back without a gamepad source
 
