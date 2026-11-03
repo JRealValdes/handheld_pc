@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Legion Go 2: trace gamepad vs keyboard paths across suspend/resume.
+# Legion Go 2: trace + light repair for gamepad vs keyboard after suspend/resume.
 #
-# The game reads InputPlumber's virtual deck pad (uhid 28de:12fb hidraw).
-# The Legion/home button and a lot of Steam OS navigation come from the
-# InputPlumber keyboard target (evdev). Those can diverge after resume.
-# This script only records state. It does not change targets or drivers.
+# The game reads Steam's XInput pad (built from InputPlumber deck-uhid 28de:12fb).
+# The Legion/home button comes from the InputPlumber keyboard target. Those can
+# diverge after resume. On each resume the watcher dumps state and tries two
+# stock-path repairs (sealed deck-uhid ACL → bounce; Proton winebus IN_ATTRIB
+# touch on the 360 pad). See KNOWLEDGE.md H1/H2.
 #
 # Usage:
 #   ./trace-legion-go2-resume-gamepad.sh snapshot     # one dump, now
@@ -14,6 +15,7 @@
 #   ./trace-legion-go2-resume-gamepad.sh uninstall
 #   ./trace-legion-go2-resume-gamepad.sh find 21:40   # cycle whose resume time matches
 #   ./trace-legion-go2-resume-gamepad.sh status
+#   ./trace-legion-go2-resume-gamepad.sh nudge        # run repair once now (Desktop/agent)
 
 set -u
 
@@ -427,24 +429,76 @@ cmd_mark() {
   fi
 }
 
+# True if any process with comm matching the regex holds an open fd on $1.
+# Root-only (needs /proc/*/fd). Returns 1 if not root or no match.
+proc_holds_node() {
+  local node="$1" comm_re="$2" pid comm link
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 1
+  [[ -n "$node" ]] || return 1
+  shopt -s nullglob
+  for pid in /proc/[0-9]*; do
+    comm="$(tr -d '\0' <"${pid}/comm" 2>/dev/null || true)"
+    [[ "$comm" =~ $comm_re ]] || continue
+    for link in "$pid"/fd/*; do
+      [[ "$(readlink "$link" 2>/dev/null || true)" == "$node" ]] && { shopt -u nullglob; return 0; }
+    done
+  done
+  shopt -u nullglob
+  return 1
+}
+
+bounce_deck_uhid() {
+  if ! command -v inputplumber >/dev/null 2>&1; then
+    echo "bounce skipped: inputplumber not in PATH"
+    return 1
+  fi
+  echo "bouncing deck-uhid targets (force Steam rediscovery)"
+  if inputplumber device 0 targets set keyboard mouse >/dev/null 2>&1; then
+    sleep 0.3
+    if inputplumber device 0 targets set deck-uhid keyboard mouse >/dev/null 2>&1; then
+      echo "targets set deck-uhid keyboard mouse"
+      return 0
+    fi
+    echo "targets set deck-uhid failed; restoring"
+    inputplumber device 0 targets set deck-uhid keyboard mouse >/dev/null 2>&1 || true
+    return 1
+  fi
+  echo "targets set keyboard mouse failed (composite may be missing)"
+  return 1
+}
+
 # Two post-resume breaks share this helper:
 # H1 — deck-uhid hidraw (28de:12fb) stays mode 000; Steam logs Unable to open
 #      and never creates "Microsoft X-Box 360 pad 0". Steam UI sticks die too.
 # H2 — Steam opens hidraw OK; Proton misses IN_ATTRIB on the new 360 pad.
 #
-# Fix H1 first (ACL + optional target bounce). Then touch the 360 pad for H2.
-# Must run ASAP after resume: Steam tried hidraw at +3s on the overnight cycle.
+# Fix H1 first (ACL + bounce). Then touch the 360 pad for H2 (up to twice if
+# Proton still has no open fd). USB can return late (21:49 hard fail): callers
+# must keep invoking this on a wall-clock schedule, not only after snapshots.
 repair_after_resume() {
   local dir="$1" tag="${2:-manual}"
   local log="${dir}/nudge.log"
-  local h name node mode mask fixed=0 bounced=0 found_360=0
-  local ev base access group_read
+  local h name node mode mask fixed=0 bounced=0 found_360=0 found_deck=0
+  local ev base access group_read touch_count=0 want_bounce=0
+  local bounced_marker="${dir}/.bounced-deck-uhid"
+  local touch_count_file="${dir}/.touch-count-xinput360"
+  local resume_epoch age=0 now
+  resume_epoch="$(tr -d '\n' <"${dir}/resume.epoch" 2>/dev/null || true)"
+  now="$(date +%s)"
+  if [[ "$resume_epoch" =~ ^[0-9]+$ ]]; then
+    age=$((now - resume_epoch))
+    [[ "$age" -ge 0 ]] || age=0
+  elif [[ "$tag" == manual ]]; then
+    # Manual nudge: allow rediscovery bounce immediately.
+    age=99
+  fi
   {
-    echo "===== repair ${tag} $(date -Is) ====="
+    echo "===== repair ${tag} $(date -Is) age=${age}s ====="
 
     shopt -s nullglob
     for h in /sys/class/hidraw/hidraw*; do
       grep -q '000012FB' "$h/device/uevent" 2>/dev/null || continue
+      found_deck=1
       name="$(basename "$h")"
       node="/dev/${name}"
       mode="$(stat -c '%a' "$node" 2>/dev/null || echo '?')"
@@ -454,6 +508,7 @@ repair_after_resume() {
         if chmod 0660 "$node" 2>/dev/null; then
           echo "chmod 0660 ${node}"
           fixed=1
+          want_bounce=1
         else
           echo "chmod failed on ${node}"
         fi
@@ -465,31 +520,46 @@ repair_after_resume() {
         echo "deck_hidraw_after mode=${mode}"
       else
         echo "deck_hidraw already openable"
+        # Steam does not retry after Unable to open. If the node is readable but
+        # Steam still holds nothing after a few seconds, bounce once. Do not
+        # bounce at age 0–2s — healthy resumes open hidraw around +2s.
+        if proc_holds_node "$node" '^steam$'; then
+          echo "steam holds ${node}"
+        elif [[ "$age" -ge 3 ]]; then
+          echo "steam not holding ${node} after ${age}s — queue rediscovery"
+          want_bounce=1
+        else
+          echo "steam not holding ${node} yet (age=${age}s) — defer bounce"
+        fi
       fi
     done
+    [[ "$found_deck" -eq 1 ]] || echo "no deck-uhid hidraw 28de:12fb yet"
 
-    # If the node was sealed when Steam first saw it, Steam does not retry.
-    # Bounce deck-uhid so udev/Steam get a new Local Device Found.
-    if [[ "$fixed" -eq 1 ]] && command -v inputplumber >/dev/null 2>&1; then
-      echo "bouncing deck-uhid targets (force Steam rediscovery)"
-      if inputplumber device 0 targets set keyboard mouse >/dev/null 2>&1; then
-        sleep 0.3
-        if inputplumber device 0 targets set deck-uhid keyboard mouse >/dev/null 2>&1; then
-          bounced=1
-          echo "targets set deck-uhid keyboard mouse"
-        else
-          echo "targets set deck-uhid failed; restoring"
-          inputplumber device 0 targets set deck-uhid keyboard mouse >/dev/null 2>&1 || true
-        fi
-      else
-        echo "targets set keyboard mouse failed"
+    # Only bounce once per cycle; skip if 360 pad already exists (Steam got far enough).
+    for ev in /sys/class/input/event*/device/name; do
+      name="$(tr -d '\n' <"$ev" 2>/dev/null || true)"
+      if [[ "$name" == "Microsoft X-Box 360 pad 0" ]]; then
+        found_360=1
+        break
       fi
+    done
+    if [[ "$want_bounce" -eq 1 && "$found_360" -eq 0 ]]; then
+      if [[ -e "$bounced_marker" ]]; then
+        echo "skip bounce: already bounced this cycle"
+      elif bounce_deck_uhid; then
+        bounced=1
+        : >"$bounced_marker"
+        publish_tree "$bounced_marker"
+      fi
+    elif [[ "$want_bounce" -eq 1 && "$found_360" -eq 1 ]]; then
+      echo "skip bounce: XInput 360 pad already present"
     fi
 
-    # Touch the 360 pad at most once per resume cycle. Repeating IN_ATTRIB
-    # while wine already holds the node is unnecessary and was a suspect for
-    # latched buttons after the 2026-11-02 01:05 resume.
-    local touched_marker="${dir}/.touched-xinput360"
+    # H2: IN_ATTRIB for Proton winebus. Up to 2 touches if winedevice still
+    # has no fd (21:31 soft fail: one late touch was not enough / too early alone).
+    [[ -r "$touch_count_file" ]] && touch_count="$(tr -d '\n' <"$touch_count_file" 2>/dev/null || echo 0)"
+    [[ "$touch_count" =~ ^[0-9]+$ ]] || touch_count=0
+    found_360=0
     for ev in /sys/class/input/event*/device/name; do
       name="$(tr -d '\n' <"$ev" 2>/dev/null || true)"
       [[ "$name" == "Microsoft X-Box 360 pad 0" ]] || continue
@@ -498,9 +568,13 @@ repair_after_resume() {
       node="/dev/input/${base}"
       access="$(stat -c '%A' "$node" 2>/dev/null || echo '?')"
       group_read="${access:4:1}"
-      echo "xinput360=${node} mode=${access}"
-      if [[ -e "$touched_marker" ]]; then
-        echo "skip touch: already nudged this cycle"
+      echo "xinput360=${node} mode=${access} touches=${touch_count}"
+      if proc_holds_node "$node" '^winedevice'; then
+        echo "skip touch: winedevice already holds ${node}"
+        continue
+      fi
+      if [[ "$touch_count" -ge 2 ]]; then
+        echo "skip touch: already nudged ${touch_count} times this cycle"
         continue
       fi
       if [[ "$group_read" != "r" && "${access:7:1}" != "r" ]]; then
@@ -508,9 +582,10 @@ repair_after_resume() {
         continue
       fi
       if touch -c "$node"; then
-        echo "touched ${node} (inotify IN_ATTRIB for Proton winebus)"
-        : >"$touched_marker"
-        publish_tree "$touched_marker"
+        touch_count=$((touch_count + 1))
+        printf '%s\n' "$touch_count" >"$touch_count_file"
+        publish_tree "$touch_count_file"
+        echo "touched ${node} (#${touch_count}, inotify IN_ATTRIB for Proton winebus)"
       else
         echo "touch failed on ${node}"
       fi
@@ -518,10 +593,43 @@ repair_after_resume() {
     shopt -u nullglob
 
     [[ "$found_360" -eq 1 ]] || echo "no Microsoft X-Box 360 pad 0"
-    echo "fixed_acl=${fixed} bounced=${bounced} xinput360=${found_360}"
+    echo "fixed_acl=${fixed} bounced=${bounced} xinput360=${found_360} touches=${touch_count}"
   } >>"$log" 2>&1
   publish_tree "$log"
   logger -t legion-go2-resume-gamepad "repair ${tag} fixed=${fixed} bounce=${bounced} ${dir}"
+}
+
+# Wall-clock repair ticks. Independent of heavy snapshots so t+2s is ~2s after
+# resume (21:49: Steam hit sealed hidraw at +2s; old schedule drifted to +30s).
+repair_loop_wallclock() {
+  local dir="$1" resume_epoch="$2" t now delay
+  for t in 1 2 3 5 8 12 20 30 45 60; do
+    now="$(date +%s)"
+    delay=$((resume_epoch + t - now))
+    if [[ "$delay" -gt 0 ]]; then
+      sleep "$delay"
+    fi
+    repair_after_resume "$dir" "t+${t}s" || true
+  done
+}
+
+snapshot_loop_post() {
+  local dir="$1" resume_epoch="$2" now delay
+  # post-0s already written in on_post before fork.
+  now="$(date +%s)"
+  delay=$((resume_epoch + 5 - now))
+  [[ "$delay" -gt 0 ]] && sleep "$delay"
+  write_snapshot "${dir}/post-5s.txt" "post-5s" || true
+  publish_tree "$dir"
+  now="$(date +%s)"
+  delay=$((resume_epoch + 15 - now))
+  [[ "$delay" -gt 0 ]] && sleep "$delay"
+  write_snapshot "${dir}/post-15s.txt" "post-15s" || true
+  copy_steam_tails "$dir" post-15s
+  collect_logs "$dir"
+  write_summary "$dir"
+  publish_tree "$dir"
+  logger -t legion-go2-resume-gamepad "cycle complete ${dir}"
 }
 
 on_pre() {
@@ -536,38 +644,29 @@ on_pre() {
 }
 
 on_post() {
-  local dir
+  local dir resume_epoch
   dir="$(cat "${STATE_DIR}/active-cycle" 2>/dev/null || true)"
   if [[ -z "$dir" || ! -d "$dir" ]]; then
     dir="$(new_cycle resume-only)"
     date +%s >"${dir}/pre.epoch"
   fi
-  # Clock + fast repair before the slow dump. Steam tried hidraw at +3s
-  # after the overnight cycle; a 30s snapshot first is too late.
+  resume_epoch="$(date +%s)"
+  printf '%s\n' "$resume_epoch" >"${dir}/resume.epoch"
+  publish_tree "${dir}/resume.epoch"
+
+  # Immediate repair + steam tails, then fork repair and snapshots apart.
+  # Heavy post-0s dump must not delay the wall-clock repair loop.
   note_event "$dir" resume
   repair_after_resume "$dir" "t+0s"
   copy_steam_tails "$dir" post-0s
-  write_snapshot "${dir}/post-0s.txt" "post-0s"
-  publish_tree "$dir"
-  logger -t legion-go2-resume-gamepad "post-0s ${dir}"
-  # Delayed dumps run outside the read loop so busctl keeps listening.
+  logger -t legion-go2-resume-gamepad "post-0s-repair ${dir}"
+
+  repair_loop_wallclock "$dir" "$resume_epoch" &
   (
-    sleep 1
-    repair_after_resume "$dir" "t+1s"
-    sleep 2
-    repair_after_resume "$dir" "t+3s"
-    sleep 2
-    write_snapshot "${dir}/post-5s.txt" "post-5s"
-    repair_after_resume "$dir" "t+5s"
-    sleep 5
-    repair_after_resume "$dir" "t+10s"
-    sleep 5
-    write_snapshot "${dir}/post-15s.txt" "post-15s"
-    copy_steam_tails "$dir" post-15s
-    collect_logs "$dir"
-    write_summary "$dir"
+    write_snapshot "${dir}/post-0s.txt" "post-0s" || true
     publish_tree "$dir"
-    logger -t legion-go2-resume-gamepad "cycle complete ${dir}"
+    logger -t legion-go2-resume-gamepad "post-0s ${dir}"
+    snapshot_loop_post "$dir" "$resume_epoch"
   ) &
 }
 

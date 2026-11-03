@@ -35,10 +35,10 @@ Agent lookup (not for you unless you want):
 ./trace-legion-go2-resume-gamepad.sh find "21:40"
 ```
 
-On each resume the watcher auto-repairs two known breaks (see cycle `nudge.log`):
+On each resume the watcher auto-repairs two known breaks (see cycle `nudge.log`), on a **wall-clock** schedule out to ~60s (separate from heavy snapshots so ticks stay on time when USB returns late):
 
-1. Sealed deck-uhid hidraw (`28de:12fb` mode `000`) → chmod/ACL + bounce `deck-uhid`.
-2. One `touch` on `Microsoft X-Box 360 pad 0` so Proton retries open.
+1. Sealed deck-uhid hidraw (`28de:12fb` mode `000`) → chmod/ACL + bounce `deck-uhid`. Also one rediscovery bounce if the node is openable but Steam still holds nothing after ~3s and the XInput pad is missing.
+2. Up to two `touch`es on `Microsoft X-Box 360 pad 0` if Proton/`winedevice` has not opened it yet.
 
 ## Remove
 

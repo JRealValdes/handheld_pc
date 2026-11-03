@@ -4,7 +4,7 @@ Durable context for: suspend in **Gaming mode with a game open**, resume succeed
 
 Distinct from [suspend-wake](../suspend-wake/KNOWLEDGE.md) (machine never finishes s2idle) and from [gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md).
 
-**Status (2026-11-02, after 01:05):** Open. H1 and H2 confirmed earlier. The 01:05 overnight resume recovered the pad (Steam opened `hidraw9`, Proton held `event16`). A few minutes later the game acted as if **RB/R1 was held**. See §3.
+**Status (2026-11-03):** Open. Soft H2 **21:31** + hard H1 **21:49** captured (§3). Hook improved afterward: wall-clock repair to 60s, ACL/bounce + dual XInput touch — unverified on next failure.
 
 **Scope of truth:** This machine. SteamOS `3.9.5` / `BUILD_ID=20261023.100`, kernel `7.2.7-valve2-2-neptune-72-g31504582a073`, `inputplumber 0.78.0`, DMI `83N0`, USB `17ef:61eb`. User report below is what they have seen several times in Gaming mode.
 
@@ -182,6 +182,36 @@ User: controls felt slow to come back, then worked; **a few minutes later** the 
 - **User (2026-11-02):** stuck RB also happened **before** this watcher existed. That demotes the multi-`touch` theory from cause to optional aggravator. Root is likely in the stock resume path (Steam Input / Proton / game), not introduced by the hook. Repair still touches the 360 pad **once** per cycle (enough for H2; no need to repeat).
 
 **If it happens again:** note whether tapping RB once clears it (classic latch) or it stays down with no physical press (synthetic hold). Capture `EVIOCGKEY` / `evtest --query` on the 360 pad while stuck.
+
+### 2026-11-02 21:31 — soft fail (game dead, Steam UI OK) = H2
+
+Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261102-190025`. Suspend 19:00, resume **21:31:24**. App was **3321460**, then UI activity toward **2767030**.
+
+| Time | What |
+|------|------|
+| 21:31:23 | Steam closes controller 15 (`hid_read failure`). |
+| 21:31:26 | Steam opens `/dev/hidraw9` index 15. ACL already openable. No `Unable to open`. |
+| t+0…t+5 | `nudge.log`: hidraw OK; **no** `Microsoft X-Box 360 pad 0` yet. `fixed_acl=0 bounced=0`. |
+| t+10 (~21:32:28) | 360 pad `event16` appears; **one** `touch`. |
+| post-15s | `event16` exists; **no** process holds it (`winedevice` absent on that node). Steam holds `hidraw9`. |
+
+**Read:** Classic H2. UI works because Steam reopened deck-uhid. Game stays dead because Proton never opened the recreated XInput pad. Our single `touch` ran but did not produce an attach by ~15s. We did not seal anything or bounce targets.
+
+### 2026-11-02 21:49 — hard fail (Steam UI sticks dead) = H1 + late USB
+
+Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261102-213641` (incomplete: only `nudge` t+0 + `post-0s`; no summary). Suspend 21:36, resume **21:49:44**. Game **2767030** / `Marvel.exe` still in session.
+
+| Time | What |
+|------|------|
+| 21:49:43 | Steam closes controller 15. |
+| t+0 / post-0s | **No** USB `17ef:61eb`, **no** `hid-lenovo-go`, **no** uhid `28de:12fb`, InputPlumber **0** composite devices. Repair: no 360 pad; no deck hidraw to chmod. |
+| 21:49:46–47 | (seen in a later cycle’s Steam copy) `Local Device Found` `/dev/hidraw4` → **`Unable to open`** twice. |
+| 21:50:33 | Steam finally opens index 15. |
+| Cycle | Delayed repairs / post-5s / post-15s **never written** (power hold or hang during the window). |
+
+**Read:** Hard fail is stock H1 after a slow USB reappear, not a bounce/chmod side effect (`fixed_acl=0 bounced=0`). Gap: t+0 is too early when USB is still missing; if later repair ticks are killed, we never chmod the sealed hidraw Steam already failed to open.
+
+**Watcher change after 21:31/21:49:** repair loop is **wall-clock** (t+0 then 1,2,3,5,8,12,20,30,45,60s) in its own background job, not chained behind `write_snapshot`. Bounce once after chmod, or once if deck hidraw is openable but Steam still holds nothing after ≥3s and no 360 pad yet. XInput `touch` up to **twice** while `winedevice` has no fd. Unverified on the next soft/hard pair.
 
 ---
 
