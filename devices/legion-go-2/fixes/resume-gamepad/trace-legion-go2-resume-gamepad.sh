@@ -339,6 +339,26 @@ write_summary() {
     echo "snapshot used: ${snap:-none}"
     echo
 
+    echo "----- verdict (read this first) -----"
+    if [[ -f "${dir}/verdict.txt" ]]; then
+      echo -n "verdict="
+      cat "${dir}/verdict.txt"
+      echo "classes: H1_NO_DECK | H1_SEALED | H2_WINE_STALE_DELETED | H2_PAD_ABSENT | H2_PAD_UNHELD | OK_WINE_ATTACHED | TRANSITIONAL"
+    else
+      echo "(no verdict.txt yet — service may predate diagnosis)"
+    fi
+    echo
+    if [[ -f "${dir}/diagnosis.txt" ]]; then
+      echo "----- diagnosis.txt (tail) -----"
+      tail -n 40 "${dir}/diagnosis.txt"
+      echo
+    fi
+    if [[ -f "${dir}/nudge.log" ]]; then
+      echo "----- nudge.log (tail) -----"
+      tail -n 30 "${dir}/nudge.log"
+      echo
+    fi
+
     echo "----- signals -----"
     if [[ -n "$snap" && -f "$snap" ]]; then
       awk 'p && !/^===== END SNAPSHOT =====$/{print} /^----- signals -----$/{p=1}' "$snap"
@@ -429,6 +449,13 @@ cmd_mark() {
   fi
 }
 
+# Read /proc/$1/comm without tripping bash on races (pid exits mid-scan).
+proc_comm() {
+  local pid="$1" f="/proc/${pid}/comm"
+  [[ -r "$f" ]] || return 1
+  tr -d '\0' <"$f" 2>/dev/null || true
+}
+
 # True if any process with comm matching the regex holds an open fd on $1.
 # Root-only (needs /proc/*/fd). Returns 1 if not root or no match.
 proc_holds_node() {
@@ -437,7 +464,7 @@ proc_holds_node() {
   [[ -n "$node" ]] || return 1
   shopt -s nullglob
   for pid in /proc/[0-9]*; do
-    comm="$(tr -d '\0' <"${pid}/comm" 2>/dev/null || true)"
+    comm="$(proc_comm "${pid#/proc/}")" || continue
     [[ "$comm" =~ $comm_re ]] || continue
     for link in "$pid"/fd/*; do
       [[ "$(readlink "$link" 2>/dev/null || true)" == "$node" ]] && { shopt -u nullglob; return 0; }
@@ -445,6 +472,107 @@ proc_holds_node() {
   done
   shopt -u nullglob
   return 1
+}
+
+# List winedevice fds that still point at a deleted /dev/input/event* (pre-suspend pad).
+# Prints "pid=… fd=… -> …" lines; exit 0 if any found.
+wine_deleted_event_fds() {
+  local pid comm link fd found=0
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 1
+  shopt -s nullglob
+  for pid in /proc/[0-9]*; do
+    comm="$(proc_comm "${pid#/proc/}")" || continue
+    [[ "$comm" == winedevice.exe ]] || continue
+    for fd in "$pid"/fd/*; do
+      link="$(readlink "$fd" 2>/dev/null || true)"
+      case "$link" in
+        /dev/input/event*' (deleted)'|/dev/input/event*'(deleted)')
+          printf 'pid=%s comm=%s fd=%s -> %s\n' "${pid#/proc/}" "$comm" "${fd##*/}" "$link"
+          found=1
+          ;;
+      esac
+    done
+  done
+  shopt -u nullglob
+  [[ "$found" -eq 1 ]]
+}
+
+# Compact per-tick diagnosis for agents. Classifies H1/H2 without applying fixes.
+# Appends to ${dir}/diagnosis.txt; also rewrites ${dir}/verdict.txt with latest class.
+append_diagnosis() {
+  local dir="$1" tag="${2:-tick}" age="${3:-?}"
+  local out="${dir}/diagnosis.txt" verdict_file="${dir}/verdict.txt"
+  local h name node mode mask found_deck=0 deck_openable=0 steam_holds=0
+  local found_360=0 wine_live=0 wine_deleted=0 class touch_count=0
+  local ev base access deleted_lines
+
+  shopt -s nullglob
+  for h in /sys/class/hidraw/hidraw*; do
+    grep -q '000012FB' "$h/device/uevent" 2>/dev/null || continue
+    found_deck=1
+    name="$(basename "$h")"
+    node="/dev/${name}"
+    mode="$(stat -c '%a' "$node" 2>/dev/null || echo '?')"
+    mask="$(getfacl -p "$node" 2>/dev/null | awk -F: '/^mask:/{print $3; exit}')"
+    if [[ "$mode" != "0" && "$mode" != "000" && "$mask" != "---" ]]; then
+      deck_openable=1
+    fi
+    if proc_holds_node "$node" '^steam$'; then
+      steam_holds=1
+    fi
+  done
+
+  for ev in /sys/class/input/event*/device/name; do
+    name="$(tr -d '\n' <"$ev" 2>/dev/null || true)"
+    [[ "$name" == "Microsoft X-Box 360 pad 0" ]] || continue
+    found_360=1
+    base="$(basename "$(dirname "$(dirname "$ev")")")"
+    node="/dev/input/${base}"
+    if proc_holds_node "$node" '^winedevice'; then
+      wine_live=1
+    fi
+  done
+  shopt -u nullglob
+
+  deleted_lines="$(wine_deleted_event_fds 2>/dev/null || true)"
+  [[ -n "$deleted_lines" ]] && wine_deleted=1
+
+  [[ -r "${dir}/.touch-count-xinput360" ]] && touch_count="$(tr -d '\n' <"${dir}/.touch-count-xinput360" 2>/dev/null || echo 0)"
+  [[ "$touch_count" =~ ^[0-9]+$ ]] || touch_count=0
+
+  if [[ "$found_deck" -eq 0 ]]; then
+    class="H1_NO_DECK"
+  elif [[ "$deck_openable" -eq 0 ]]; then
+    class="H1_SEALED"
+  elif [[ "$wine_deleted" -eq 1 && "$wine_live" -eq 0 ]]; then
+    class="H2_WINE_STALE_DELETED"
+  elif [[ "$found_360" -eq 0 ]]; then
+    if [[ "$steam_holds" -eq 1 ]]; then
+      class="H2_PAD_ABSENT"
+    else
+      class="TRANSITIONAL"
+    fi
+  elif [[ "$wine_live" -eq 0 ]]; then
+    class="H2_PAD_UNHELD"
+  else
+    class="OK_WINE_ATTACHED"
+  fi
+
+  {
+    echo "===== diagnosis ${tag} $(date -Is) age=${age}s ====="
+    echo "class=${class}"
+    echo "deck_present=${found_deck} deck_openable=${deck_openable} steam_holds_deck=${steam_holds}"
+    echo "xinput360_present=${found_360} wine_holds_live=${wine_live} wine_holds_deleted=${wine_deleted} touches=${touch_count}"
+    if [[ -n "$deleted_lines" ]]; then
+      echo "wine_deleted_fds:"
+      printf '%s\n' "$deleted_lines"
+    fi
+  } >>"$out"
+  publish_tree "$out"
+
+  printf '%s\n' "$class" >"$verdict_file"
+  publish_tree "$verdict_file"
+  logger -t legion-go2-resume-gamepad "diagnosis ${tag} ${class} ${dir}"
 }
 
 bounce_deck_uhid() {
@@ -596,6 +724,7 @@ repair_after_resume() {
     echo "fixed_acl=${fixed} bounced=${bounced} xinput360=${found_360} touches=${touch_count}"
   } >>"$log" 2>&1
   publish_tree "$log"
+  append_diagnosis "$dir" "$tag" "$age" || true
   logger -t legion-go2-resume-gamepad "repair ${tag} fixed=${fixed} bounce=${bounced} ${dir}"
 }
 
@@ -611,6 +740,72 @@ repair_loop_wallclock() {
     fi
     repair_after_resume "$dir" "t+${t}s" || true
   done
+  # Final classification after the last tick (agent reads verdict.txt first).
+  append_diagnosis "$dir" "final" 60 || true
+  {
+    echo "===== final $(date -Is) ====="
+    echo -n "verdict="
+    cat "${dir}/verdict.txt" 2>/dev/null || echo UNKNOWN
+    echo "See diagnosis.txt (per-tick) and nudge.log (actions)."
+  } >>"${dir}/diagnosis.txt"
+  publish_tree "${dir}/diagnosis.txt"
+}
+
+# Lightweight late dump: holders of deck-uhid / XInput / wine deleted fds.
+# Full post-0/5/15 snapshots miss H2 when the pad appears after ~15–20s.
+write_holders_snapshot() {
+  local out="$1" tag="${2:-holders}"
+  local h name node ev base
+  {
+    echo "===== Legion Go 2 holders ($tag) ====="
+    echo "time: $(date -Is)"
+    echo
+    echo "----- deck-uhid 28de:12fb -----"
+    shopt -s nullglob
+    for h in /sys/class/hidraw/hidraw*; do
+      grep -q '000012FB' "$h/device/uevent" 2>/dev/null || continue
+      name="$(basename "$h")"
+      node="/dev/${name}"
+      stat -c '%n mode=%a %A' "$node" 2>/dev/null || true
+      getfacl -p "$node" 2>/dev/null | awk '/^(user:|mask:|other:)/ { print }' || true
+    done
+    echo
+    echo "----- Microsoft X-Box 360 pad 0 -----"
+    for ev in /sys/class/input/event*/device/name; do
+      name="$(tr -d '\n' <"$ev" 2>/dev/null || true)"
+      [[ "$name" == "Microsoft X-Box 360 pad 0" ]] || continue
+      base="$(basename "$(dirname "$(dirname "$ev")")")"
+      node="/dev/input/${base}"
+      stat -c '%n mode=%a %A' "$node" 2>/dev/null || true
+    done
+    echo
+    echo "----- open fds (steam / winedevice / inputplumber on hidraw|event|js) -----"
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+      local pid comm link
+      for pid in /proc/[0-9]*; do
+        comm="$(proc_comm "${pid#/proc/}")" || continue
+        case "$comm" in
+          steam|winedevice.exe|inputplumber) ;;
+          *) continue ;;
+        esac
+        for link in "$pid"/fd/*; do
+          target="$(readlink "$link" 2>/dev/null || true)"
+          case "$target" in
+            /dev/hidraw*|/dev/input/event*|/dev/input/js*|*' (deleted)'|*'(deleted)')
+              printf 'pid=%s comm=%s fd=%s -> %s\n' "${pid#/proc/}" "$comm" "${link##*/}" "$target"
+              ;;
+          esac
+        done
+      done
+    else
+      echo "(not root)"
+    fi
+    shopt -u nullglob
+    echo
+    echo "----- wine deleted event fds -----"
+    wine_deleted_event_fds 2>/dev/null || echo "(none)"
+  } >"$out"
+  publish_tree "$out"
 }
 
 snapshot_loop_post() {
@@ -626,6 +821,16 @@ snapshot_loop_post() {
   [[ "$delay" -gt 0 ]] && sleep "$delay"
   write_snapshot "${dir}/post-15s.txt" "post-15s" || true
   copy_steam_tails "$dir" post-15s
+  # Late holders: 22:08 H2 pad/touch window was ~20–30s; 15s alone was too early.
+  now="$(date +%s)"
+  delay=$((resume_epoch + 30 - now))
+  [[ "$delay" -gt 0 ]] && sleep "$delay"
+  write_holders_snapshot "${dir}/holders-30s.txt" "holders-30s" || true
+  now="$(date +%s)"
+  delay=$((resume_epoch + 60 - now))
+  [[ "$delay" -gt 0 ]] && sleep "$delay"
+  write_holders_snapshot "${dir}/holders-60s.txt" "holders-60s" || true
+  copy_steam_tails "$dir" post-60s
   collect_logs "$dir"
   write_summary "$dir"
   publish_tree "$dir"

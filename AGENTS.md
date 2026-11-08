@@ -16,9 +16,9 @@ This repository stores **tools and fixes** for handheld PCs (Steam Deck, Lenovo 
 1. Read the device fix `KNOWLEDGE.md` before inventing a new theory.
    Legion Go 2 resume pad / stuck RB: `devices/legion-go-2/fixes/resume-gamepad/KNOWLEDGE.md` §0.
    User flow is Desktop + clock time + one-line symptom. **You** run
-   `trace-legion-go2-resume-gamepad.sh find <HH:MM>` (not only `LATEST`), read that cycle,
-   and any follow-up commands (`status`, `nudge`, `snapshot`, `evtest --query`, …). Do not ask
-   them to run nudges in Gaming mode.
+   `trace-legion-go2-resume-gamepad.sh find <HH:MM>` (not only `LATEST`), read `verdict.txt` /
+   `diagnosis.txt` first when present, then the rest of that cycle. Diagnose H1 vs H2 before
+   expanding repair. Do not ask them to run nudges in Gaming mode.
 2. Run the fix script if one exists; if it fails, use its debug dump.
 3. Do **not** reinstall custom InputPlumber binaries or set `GYRO_GAIN` multipliers unless stock paths are proven broken *and* documented.
 

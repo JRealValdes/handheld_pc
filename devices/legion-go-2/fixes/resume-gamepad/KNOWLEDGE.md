@@ -4,7 +4,7 @@ Durable context for: suspend in **Gaming mode with a game open**, resume succeed
 
 Distinct from [suspend-wake](../suspend-wake/KNOWLEDGE.md) (machine never finishes s2idle) and from [gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md).
 
-**Status (2026-11-03):** Open. Soft H2 **21:31** + hard H1 **21:49** captured (§3). Hook improved afterward: wall-clock repair to 60s, ACL/bounce + dual XInput touch — unverified on next failure.
+**Status (2026-11-08):** Open. Soft H2 again at **22:08** (§3). Philosophy: **diagnose first** (`verdict.txt` / `diagnosis.txt` / late holders dumps), then hammer. Do not expand repair until the class is unambiguous.
 
 **Scope of truth:** This machine. SteamOS `3.9.5` / `BUILD_ID=20261023.100`, kernel `7.2.7-valve2-2-neptune-72-g31504582a073`, `inputplumber 0.78.0`, DMI `83N0`, USB `17ef:61eb`. User report below is what they have seen several times in Gaming mode.
 
@@ -33,8 +33,8 @@ cd "devices/legion-go-2/fixes/resume-gamepad"
 
 Replace `21:40` with the time they gave. Match the `resume` line. `LATEST` may be a later suspend, a Desktop session, or a service restart.
 
-4. In that cycle: `summary.txt`, `nudge.log`, `post-0s.txt` / `post-5s.txt` / `post-15s.txt` (signals + open fds), `steam-post-*-controller.txt`, `steam-*-controller_ui.txt`, `journal-inputplumber.txt`.
-5. Decide with §4 (dead pad) or stuck-button notes in §3. Record back into §3. Do not restart InputPlumber or change targets until that cycle is read.
+4. In that cycle, read in order: `verdict.txt` (if present), `diagnosis.txt`, `nudge.log`, then `summary.txt`, `holders-30s.txt` / `holders-60s.txt`, `post-0s.txt` (look for `event* (deleted)` held by `winedevice`), `post-5s`/`post-15s`, steam tails, journals.
+5. Decide with §4 (dead pad) or stuck-button notes in §3. Record back into §3. Prefer classifying H1 vs H2 before proposing more repair. Do not restart InputPlumber or change targets until that cycle is read.
 6. Optional live checks on Desktop only if still useful: `./trace-….sh status`, `snapshot`, `nudge` (writes `~/legion-go2-resume-gamepad/manual-nudge/`), or `evtest --query` on the current 360 pad — knowing the game may already be gone and a stuck RB may have cleared.
 
 Switching Gaming → Desktop is **not** a suspend. It does not create a cycle and does not delete old ones (`~/legion-go2-resume-gamepad/cycles/`, last 20, plus `index.txt`). Steam may rotate live `controller.txt` on Desktop; prefer the cycle copies (`steam-post-0s-*`, `steam-post-15s-*`).
@@ -211,7 +211,26 @@ Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261102-213641` (incomplete: on
 
 **Read:** Hard fail is stock H1 after a slow USB reappear, not a bounce/chmod side effect (`fixed_acl=0 bounced=0`). Gap: t+0 is too early when USB is still missing; if later repair ticks are killed, we never chmod the sealed hidraw Steam already failed to open.
 
-**Watcher change after 21:31/21:49:** repair loop is **wall-clock** (t+0 then 1,2,3,5,8,12,20,30,45,60s) in its own background job, not chained behind `write_snapshot`. Bounce once after chmod, or once if deck hidraw is openable but Steam still holds nothing after ≥3s and no 360 pad yet. XInput `touch` up to **twice** while `winedevice` has no fd. Unverified on the next soft/hard pair.
+**Watcher change after 21:31/21:49:** repair loop is **wall-clock** (t+0 then 1,2,3,5,8,12,20,30,45,60s) in its own background job, not chained behind `write_snapshot`. Bounce once after chmod, or once if deck hidraw is openable but Steam still holds nothing after ≥3s and no 360 pad yet. XInput `touch` up to **twice** while `winedevice` has no fd.
+
+### 2026-11-08 22:08 — soft fail again (H2), dual touch did not attach
+
+Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261108-213020`. Suspend 21:30, resume **22:08:01**. App **3321460**. User: game pad dead, Steam UI OK.
+
+| Time | What |
+|------|------|
+| 22:08:01 | Steam closes controller 15. |
+| 22:08:04 | Steam opens `/dev/hidraw4` index 15. ACL openable. No `Unable to open`. |
+| post-0s | **`winedevice` holds `/dev/input/event16 (deleted)`** (stale pre-suspend XInput fd). |
+| t+0…t+12 | No 360 pad yet in `nudge.log`. `fixed_acl=0 bounced=0`. |
+| ~post-5s | New `Microsoft X-Box 360 pad 0` on `event16` exists; Steam holds `hidraw4`; **no** live wine hold on the new node. |
+| t+20 / t+30 | Two `touch`es on `event16`. |
+| t+45 / t+60 | Still no wine live hold; skip further touches. |
+| 22:08:15–52 | Repeated Guide overlay ↔ game (user trying to recover). |
+
+**Read:** Confirmed **H2**. Smoking gun is wine’s **deleted** `event16` at post-0s while Steam UI path recovered. Repair touches ran and still no attach by 60s — do **not** escalate hammer yet; add diagnosis artifacts (`verdict.txt`, late holders dumps) so the next report classifies in one file.
+
+**Watcher change after 22:08 (diagnose-first):** each repair tick appends `diagnosis.txt` and updates `verdict.txt` (`H1_NO_DECK` / `H1_SEALED` / `H2_WINE_STALE_DELETED` / `H2_PAD_ABSENT` / `H2_PAD_UNHELD` / `OK_WINE_ATTACHED` / `TRANSITIONAL`). Late `holders-30s.txt` / `holders-60s.txt`. Summary leads with verdict. Fix `proc_holds_node` races. No new repair actions.
 
 ---
 

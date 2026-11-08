@@ -18,7 +18,7 @@ Do **not** run scripts in Gaming mode. Do **not** need `nudge` yourself.
 2. Note the symptom in one line, e.g. “mando muerto en el juego, UI Steam OK” / “UI Steam también muerta” / “RB fantasma; toqué RB y [sí/no] soltó”.
 3. Switch to **Desktop** and say that here in chat.
 
-The agent recovers `~/legion-go2-resume-gamepad/cycles/…` with `find "HH:MM"` and digs. Going to Desktop is fine: it does not delete those dumps (it is not a suspend). Leaving the game may clear a live stuck-RB state; the resume cycle + your note are still enough to investigate.
+The agent recovers `~/legion-go2-resume-gamepad/cycles/…` with `find "HH:MM"` and digs (`verdict.txt` / `diagnosis.txt` first). Going to Desktop is fine: it does not delete those dumps (it is not a suspend). Leaving the game may clear a live stuck-RB state; the resume cycle + your note are still enough to investigate.
 
 ## Capture (install / agent)
 
@@ -35,10 +35,12 @@ Agent lookup (not for you unless you want):
 ./trace-legion-go2-resume-gamepad.sh find "21:40"
 ```
 
-On each resume the watcher auto-repairs two known breaks (see cycle `nudge.log`), on a **wall-clock** schedule out to ~60s (separate from heavy snapshots so ticks stay on time when USB returns late):
+On each resume the watcher **classifies** the state (`verdict.txt`, `diagnosis.txt`, `holders-30s.txt` / `holders-60s.txt`) and lightly auto-repairs two known breaks (see `nudge.log`) on a **wall-clock** schedule out to ~60s:
 
 1. Sealed deck-uhid hidraw (`28de:12fb` mode `000`) → chmod/ACL + bounce `deck-uhid`. Also one rediscovery bounce if the node is openable but Steam still holds nothing after ~3s and the XInput pad is missing.
 2. Up to two `touch`es on `Microsoft X-Box 360 pad 0` if Proton/`winedevice` has not opened it yet.
+
+Priority is diagnosis clarity first; expand repair only after a class repeats with a clear smoking gun.
 
 ## Remove
 
