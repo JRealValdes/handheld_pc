@@ -780,23 +780,28 @@ write_holders_snapshot() {
     done
     echo
     echo "----- open fds (steam / winedevice / inputplumber on hidraw|event|js) -----"
+    # Same scan style as write_snapshot (do not pre-filter via proc_comm + local
+    # inside a redirected group — 2026-11-11 holders-*.txt came back empty while
+    # post-15s showed steam holding hidraw).
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-      local pid comm link
-      for pid in /proc/[0-9]*; do
-        comm="$(proc_comm "${pid#/proc/}")" || continue
-        case "$comm" in
+      local _pid _comm _fd _target _n=0
+      for _pid in /proc/[0-9]*; do
+        _comm="$(tr -d '\0' <"${_pid}/comm" 2>/dev/null || true)"
+        case "$_comm" in
           steam|winedevice.exe|inputplumber) ;;
           *) continue ;;
         esac
-        for link in "$pid"/fd/*; do
-          target="$(readlink "$link" 2>/dev/null || true)"
-          case "$target" in
-            /dev/hidraw*|/dev/input/event*|/dev/input/js*|*' (deleted)'|*'(deleted)')
-              printf 'pid=%s comm=%s fd=%s -> %s\n' "${pid#/proc/}" "$comm" "${link##*/}" "$target"
+        for _fd in "$_pid"/fd/*; do
+          _target="$(readlink "$_fd" 2>/dev/null || true)"
+          case "$_target" in
+            /dev/hidraw*|'/dev/input/event'*|/dev/input/js*)
+              printf 'pid=%s comm=%s fd=%s -> %s\n' "${_pid#/proc/}" "$_comm" "${_fd##*/}" "$_target"
+              _n=$((_n + 1))
               ;;
           esac
         done
       done
+      [[ "$_n" -gt 0 ]] || echo "(no matching open fds)"
     else
       echo "(not root)"
     fi

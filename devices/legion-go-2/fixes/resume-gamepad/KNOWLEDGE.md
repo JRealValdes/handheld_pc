@@ -4,7 +4,7 @@ Durable context for: suspend in **Gaming mode with a game open**, resume succeed
 
 Distinct from [suspend-wake](../suspend-wake/KNOWLEDGE.md) (machine never finishes s2idle) and from [gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md).
 
-**Status (2026-11-08):** Open. Soft H2 again at **22:08** (§3). Philosophy: **diagnose first** (`verdict.txt` / `diagnosis.txt` / late holders dumps), then hammer. Do not expand repair until the class is unambiguous.
+**Status (2026-11-11):** Open. Dual resume at **17:56** / **17:57** captured (§3). Soft H2 confirmed on second resume; first resume looks like slow/partial Steam reopen + overlapping second suspend. New user symptom: **freeze on leaving the game** (force power) — no cycle dump (power cut). Decky **Panel de Control** (Hooandee, root) installed same day; journal shows it re-applying TDP on resume — correlation only. Philosophy unchanged: diagnose first.
 
 **Scope of truth:** This machine. SteamOS `3.9.5` / `BUILD_ID=20261023.100`, kernel `7.2.7-valve2-2-neptune-72-g31504582a073`, `inputplumber 0.78.0`, DMI `83N0`, USB `17ef:61eb`. User report below is what they have seen several times in Gaming mode.
 
@@ -231,6 +231,47 @@ Cycle `~/legion-go2-resume-gamepad/cycles/cycle-20261108-213020`. Suspend 21:30,
 **Read:** Confirmed **H2**. Smoking gun is wine’s **deleted** `event16` at post-0s while Steam UI path recovered. Repair touches ran and still no attach by 60s — do **not** escalate hammer yet; add diagnosis artifacts (`verdict.txt`, late holders dumps) so the next report classifies in one file.
 
 **Watcher change after 22:08 (diagnose-first):** each repair tick appends `diagnosis.txt` and updates `verdict.txt` (`H1_NO_DECK` / `H1_SEALED` / `H2_WINE_STALE_DELETED` / `H2_PAD_ABSENT` / `H2_PAD_UNHELD` / `OK_WINE_ATTACHED` / `TRANSITIONAL`). Late `holders-30s.txt` / `holders-60s.txt`. Summary leads with verdict. Fix `proc_holds_node` races. No new repair actions.
+
+### 2026-11-11 17:56–17:58 — hard then soft, then freeze on game exit
+
+Two cycles back-to-back; then forced power (service came back `ExecMainStartTimestamp=17:59:51`).
+
+#### Resume 1 — 17:56:44 (`cycle-20261111-150839`)
+
+User: mandos + Steam UI dead.
+
+| Evidence | Note |
+|----------|------|
+| `diagnosis` t+0 | `H1_NO_DECK` |
+| t+1… | deck `hidraw4` openable; `steam_holds_deck=0` in diagnosis for the whole cycle |
+| t+2… | 360 pad present; two touches; verdict stays `H2_PAD_UNHELD` |
+| `steam-post-0s` | Only `hid_read failure` / PollState 0 at 17:56:44 — **no** `device opened` in that immediate tail |
+| `post-0s` (slow dump) | Later shows `steam` holding `hidraw4` **and** `winedevice` holding live `event16` (+ a deleted hidraw0) — snapshot lag / mid-recovery |
+| t+45 | `H1_NO_DECK` again — **overlaps** second suspend at 17:57:25 |
+| Steam reopen in logs | First clear `opened for index 15` in this cycle’s later tails is **17:57:35** (second resume) |
+
+**Read:** Matches a bad/slow Steam UI path on first wake (no open in the early Steam tail). Not a sealed-ACL H1 (`mode=660`). Final `verdict=H2_PAD_UNHELD` is partly polluted by the overlapping second suspend and by diagnosis missing steam’s hold that `post-0s` eventually saw.
+
+#### Resume 2 — 17:57:33 (`cycle-20261111-175725`)
+
+User: Steam UI OK, game dead.
+
+| Evidence | Note |
+|----------|------|
+| 17:57:35 | Steam opens `/dev/hidraw10` index 15 |
+| `post-5s` / `post-15s` | `steam` holds `hidraw10`; **no** `winedevice` on `event16` |
+| `verdict` | `H2_PAD_UNHELD` through 60s; two touches, no attach |
+
+**Read:** Clean **H2** (UI path up, Proton not on the new XInput pad). Same nail as 22:08 / 21:31.
+
+#### Freeze on leaving the game (new)
+
+No watcher cycle: force power-off kills logging. Journal around resume shows Decky `PluginLoader` / **Panel de Control** (`resume_detected`, TDP/CPU/fan reapply). Plugin dir mtime **2026-11-11 14:43**, flags `root`. **No proof** it caused the hang; worth an A/B (disable plugin) if freezes repeat. Distinct from H1/H2 pad loss.
+
+#### Diagnosis gaps found this incident
+
+- `holders-30s.txt` / `holders-60s.txt` listed **no** open fds while `post-15s` showed `steam → hidraw10` — holders scanner bug; fixed to match `write_snapshot` style.
+- Back-to-back suspends interleave two repair loops; read **both** cycles when the user reports a cluster.
 
 ---
 
