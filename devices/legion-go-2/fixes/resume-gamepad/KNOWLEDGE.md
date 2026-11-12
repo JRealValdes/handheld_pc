@@ -4,7 +4,7 @@ Durable context for: suspend in **Gaming mode with a game open**, resume succeed
 
 Distinct from [suspend-wake](../suspend-wake/KNOWLEDGE.md) (machine never finishes s2idle) and from [gyroscope-imu-udev](../gyroscope-imu-udev/KNOWLEDGE.md).
 
-**Status (2026-11-11):** Open. Dual resume at **17:56** / **17:57** captured (§3). Soft H2 confirmed on second resume; first resume looks like slow/partial Steam reopen + overlapping second suspend. New user symptom: **freeze on leaving the game** (force power) — no cycle dump (power cut). Decky **Panel de Control** (Hooandee, root) installed same day; journal shows it re-applying TDP on resume — correlation only. Philosophy unchanged: diagnose first.
+**Status (2026-11-12):** Open. New cluster **15:28** (§3): (1) in-game OK except **right-stick hypersensitive**, (2) second resume → no buttons / H2, (3) freeze on quit game again (dumps truncated mid-write). Philosophy unchanged: diagnose first.
 
 **Scope of truth:** This machine. SteamOS `3.9.5` / `BUILD_ID=20261023.100`, kernel `7.2.7-valve2-2-neptune-72-g31504582a073`, `inputplumber 0.78.0`, DMI `83N0`, USB `17ef:61eb`. User report below is what they have seen several times in Gaming mode.
 
@@ -272,6 +272,34 @@ No watcher cycle: force power-off kills logging. Journal around resume shows Dec
 
 - `holders-30s.txt` / `holders-60s.txt` listed **no** open fds while `post-15s` showed `steam → hidraw10` — holders scanner bug; fixed to match `write_snapshot` style.
 - Back-to-back suspends interleave two repair loops; read **both** cycles when the user reports a cluster.
+
+### 2026-11-12 15:28 — hypersensitive RS → dead pad → freeze on quit
+
+Cycles `cycle-20261112-140658` (resume **15:28:05**) then `cycle-20261112-152850` (suspend 15:28:50 / resume **15:28:57**). Force power ~15:29 (service restart 15:30:18). App **3321460**.
+
+#### Resume A — 15:28:05 (user: all OK except right stick “muy muy” sensitive)
+
+| Evidence | Note |
+|----------|------|
+| 15:28:07 | Steam opens **Xbox One Elite 2** as controller **0** (`45e:b00`, `uses xinput : false`) — InputPlumber’s brief `xbox-elite` target |
+| 15:28:08 / :10 | Steam opens Legion `28de:12fb` index **15** (twice) |
+| `post-0s` | `steam` → `hidraw4`; **`winedevice` has four fds on live `event16`** (Microsoft X-Box 360 pad 0) |
+| `post-5s` | Same wine pid still has **four** `event16 (deleted)` fds; new 360 pad exists; steam on `hidraw4` |
+| `post-15s` | steam on `hidraw4`; no wine lines in the open-fd filter |
+| `diagnosis` | Final `H2_PAD_UNHELD`; never reported `wine_holds_deleted=1` despite post-5s — detector gap |
+| Late files | `holders-*`, journals, `summary`, steam-post-15s/60s are **0-byte** (second cycle / power cut ate the late writer) |
+
+**Read:** Not “dead pad”. Game had input. Hypotheses for RS hypersensitivity (unproven): (a) **multiple wine fds** on the same XInput node amplifying axes; (b) brief **Elite 2 + Legion** dual-controller / wrong config; (c) Steam Input + Proton both driving look. Need axis/fd-count in diagnosis next time.
+
+#### Resume B — 15:28:57 (user: no buttons; Steam UI OK → quit → freeze)
+
+| Evidence | Note |
+|----------|------|
+| `verdict` / diagnosis | `H2_PAD_UNHELD` through the ticks that finished |
+| Dumps | `post-0s` truncated with **NUL padding**; `post-5s`/`post-15s` empty; `nudge.log` cut mid-line — **power cut while writing** |
+| Freeze | Same new symptom as 2026-11-11 (hang on leaving game / force power). Still no stack trace. Decky Panel de Control remains chronological suspect only. |
+
+**Read:** Classic soft H2 after the second resume, then hang outside our pad path.
 
 ---
 

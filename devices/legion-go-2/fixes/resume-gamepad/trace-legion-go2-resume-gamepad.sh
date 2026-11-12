@@ -343,7 +343,7 @@ write_summary() {
     if [[ -f "${dir}/verdict.txt" ]]; then
       echo -n "verdict="
       cat "${dir}/verdict.txt"
-      echo "classes: H1_NO_DECK | H1_SEALED | H2_WINE_STALE_DELETED | H2_PAD_ABSENT | H2_PAD_UNHELD | OK_WINE_ATTACHED | TRANSITIONAL"
+      echo "classes: H1_NO_DECK | H1_SEALED | H2_WINE_STALE_DELETED | H2_PAD_ABSENT | H2_PAD_UNHELD | H2_WINE_MULTI_FD | OK_WINE_ATTACHED | TRANSITIONAL"
     else
       echo "(no verdict.txt yet — service may predate diagnosis)"
     fi
@@ -481,20 +481,35 @@ wine_deleted_event_fds() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 1
   shopt -s nullglob
   for pid in /proc/[0-9]*; do
-    comm="$(proc_comm "${pid#/proc/}")" || continue
+    comm="$(tr -d '\0' <"${pid}/comm" 2>/dev/null || true)"
     [[ "$comm" == winedevice.exe ]] || continue
     for fd in "$pid"/fd/*; do
       link="$(readlink "$fd" 2>/dev/null || true)"
-      case "$link" in
-        /dev/input/event*' (deleted)'|/dev/input/event*'(deleted)')
-          printf 'pid=%s comm=%s fd=%s -> %s\n' "${pid#/proc/}" "$comm" "${fd##*/}" "$link"
-          found=1
-          ;;
-      esac
+      # readlink prints: /dev/input/event16 (deleted)
+      if [[ "$link" == /dev/input/event* && "$link" == *'(deleted)'* ]]; then
+        printf 'pid=%s comm=%s fd=%s -> %s\n' "${pid#/proc/}" "$comm" "${fd##*/}" "$link"
+        found=1
+      fi
     done
   done
   shopt -u nullglob
   [[ "$found" -eq 1 ]]
+}
+
+# Count winedevice open fds on a live node (hypersensitivity suspect: >1 on same event).
+wine_live_fd_count() {
+  local node="$1" pid link n=0
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo 0; return 1; }
+  [[ -n "$node" ]] || { echo 0; return 1; }
+  shopt -s nullglob
+  for pid in /proc/[0-9]*; do
+    [[ "$(tr -d '\0' <"${pid}/comm" 2>/dev/null || true)" == winedevice.exe ]] || continue
+    for link in "$pid"/fd/*; do
+      [[ "$(readlink "$link" 2>/dev/null || true)" == "$node" ]] && n=$((n + 1))
+    done
+  done
+  shopt -u nullglob
+  echo "$n"
 }
 
 # Compact per-tick diagnosis for agents. Classifies H1/H2 without applying fixes.
@@ -503,8 +518,8 @@ append_diagnosis() {
   local dir="$1" tag="${2:-tick}" age="${3:-?}"
   local out="${dir}/diagnosis.txt" verdict_file="${dir}/verdict.txt"
   local h name node mode mask found_deck=0 deck_openable=0 steam_holds=0
-  local found_360=0 wine_live=0 wine_deleted=0 class touch_count=0
-  local ev base access deleted_lines
+  local found_360=0 wine_live=0 wine_deleted=0 class touch_count=0 wine_fd_n=0
+  local ev base access deleted_lines xinput_node=""
 
   shopt -s nullglob
   for h in /sys/class/hidraw/hidraw*; do
@@ -527,8 +542,10 @@ append_diagnosis() {
     [[ "$name" == "Microsoft X-Box 360 pad 0" ]] || continue
     found_360=1
     base="$(basename "$(dirname "$(dirname "$ev")")")"
-    node="/dev/input/${base}"
-    if proc_holds_node "$node" '^winedevice'; then
+    xinput_node="/dev/input/${base}"
+    wine_fd_n="$(wine_live_fd_count "$xinput_node")"
+    [[ "$wine_fd_n" =~ ^[0-9]+$ ]] || wine_fd_n=0
+    if [[ "$wine_fd_n" -gt 0 ]]; then
       wine_live=1
     fi
   done
@@ -554,6 +571,9 @@ append_diagnosis() {
     fi
   elif [[ "$wine_live" -eq 0 ]]; then
     class="H2_PAD_UNHELD"
+  elif [[ "$wine_fd_n" -gt 1 ]]; then
+    # 2026-11-12 15:28: four fds on event16 coincided with hypersensitive RS.
+    class="H2_WINE_MULTI_FD"
   else
     class="OK_WINE_ATTACHED"
   fi
@@ -562,7 +582,7 @@ append_diagnosis() {
     echo "===== diagnosis ${tag} $(date -Is) age=${age}s ====="
     echo "class=${class}"
     echo "deck_present=${found_deck} deck_openable=${deck_openable} steam_holds_deck=${steam_holds}"
-    echo "xinput360_present=${found_360} wine_holds_live=${wine_live} wine_holds_deleted=${wine_deleted} touches=${touch_count}"
+    echo "xinput360_present=${found_360} xinput360_node=${xinput_node:-none} wine_holds_live=${wine_live} wine_live_fd_count=${wine_fd_n} wine_holds_deleted=${wine_deleted} touches=${touch_count}"
     if [[ -n "$deleted_lines" ]]; then
       echo "wine_deleted_fds:"
       printf '%s\n' "$deleted_lines"
@@ -809,7 +829,8 @@ write_holders_snapshot() {
     echo
     echo "----- wine deleted event fds -----"
     wine_deleted_event_fds 2>/dev/null || echo "(none)"
-  } >"$out"
+  } >"${out}.tmp"
+  mv -f "${out}.tmp" "$out"
   publish_tree "$out"
 }
 
