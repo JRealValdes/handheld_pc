@@ -6,7 +6,7 @@ SteamOS handheld (DMI product `{83N0,83N1}`). Input stack: **InputPlumber** + **
 
 | Fix | Summary |
 |-----|---------|
-| [gyroscope-imu-udev](fixes/gyroscope-imu-udev/) | Gyro knowledge + fixes; script currently covers Case A (stock udev IMU attrs) |
+| [gyroscope-imu-udev](fixes/gyroscope-imu-udev/) | Gyro knowledge + fixes; script currently covers Case A (stock udev IMU attrs, including after a Windows boot clears them) |
 | [suspend-wake](fixes/suspend-wake/) | Open: s2idle stuck — optional settle; dumps only with `--debug` |
 | [resume-gamepad](fixes/resume-gamepad/) | Open: after resume the game loses the pad; Legion button / Steam OS still work |
 

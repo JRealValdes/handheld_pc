@@ -39,7 +39,7 @@ chmod +x fix-legion-go2-gyro.sh
 ./fix-legion-go2-gyro.sh
 ```
 
-Read the knowledge base first if something regresses after a SteamOS update:
+Read the knowledge base first if something regresses after a SteamOS update or after booting Windows and coming back:
 
 → [`devices/legion-go-2/fixes/gyroscope-imu-udev/KNOWLEDGE.md`](devices/legion-go-2/fixes/gyroscope-imu-udev/KNOWLEDGE.md)
 

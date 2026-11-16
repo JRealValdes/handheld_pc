@@ -6,6 +6,8 @@ Gyro can fail for more than one reason. This file holds **architecture** (always
 
 **Verified on:** SteamOS 3.8.16 · kernel `6.16.12-valve24.5-1-neptune-616` · `inputplumber` 0.77.4–0.78.0 · handle FW `260310a` · USB `17ef:61eb`
 
+**Also confirmed 2026-11-16:** SteamOS 3.9.5 (`BUILD_ID=20261023.100`) · kernel `7.2.7-valve2-2-neptune-72-g31504582a073` · `inputplumber` 0.78.0 · product `83N0` · base FW `260422a` · handle FW `260310a` · USB `17ef:61eb` · `os_mode=linux`. Stock udev still uses the typo. Case A unchanged.
+
 **Scope of truth:** Facts below were confirmed on that stack at the time of writing. SteamOS, InputPlumber, `hid-lenovo-go`, and Lenovo firmware change. Treat this as a working baseline — re-verify after updates, and revise this file when behavior or paths diverge. It is not a permanently frozen truth.
 
 ---
@@ -74,6 +76,23 @@ Add a subsection when a new root cause is confirmed. Keep each case self-contain
 
 **Cause:** Stock `/usr/lib/udev/rules.d/99-inputplumber-device-setup.rules` writes `imu_bypass_enable` (missing final `d`) and never sets `imu_enabled`. Real attrs are `imu_enabled` and `imu_bypass_enabled`. Handle IMUs stay off.
 
+**Trigger seen 2026-11-16:** A Windows boot cleared the controller's persisted IMU flags. Coming back to SteamOS (Secure Boot change undone in intent, boot order restored to SteamOS first) left:
+
+| Handle | `imu_enabled` | `imu_bypass_enabled` |
+|--------|----------------|----------------------|
+| left | `true` | `false` |
+| right | `false` | `false` |
+
+Secure Boot and boot order do not write these attrs. On that machine Secure Boot was still disabled in the EFI variable (`SecureBoot` flag `0`); that was unrelated. Reboot did not recover because `/etc/udev/rules.d/` had no overlay, so only the stock typo ran. Boot journal on `0003:17EF:61EB.000A`: `imu_bypass_enable` … `No such file or directory`.
+
+InputPlumber can still list `Gyroscope:Left/Right/Center` and target `deck-uhid` while the flags are off. Capabilities are not proof the handles are streaming.
+
+**Readback lag:** `printf true > imu_*` can succeed and the next `cat` still show `false` or `unknown`. The controller confirms a moment later. On this incident the script's immediate readback failed, then the debug dump (about a second later) and a live sample showed all four `true`. Do not open a new case on one instant read. The script now retries for about 2s.
+
+**What "fixed" looked like:** all four attrs `true`, `mode=xinput`, stock `/usr/bin/inputplumber`, target `deck-uhid`. The virtual Deck hidraw (`28de:12fb`, 64-byte report id `0x01`) carried a live 6-axis IMU: one accel axis near 1g, gyro axes near zero with noise. In-game gyro worked after that.
+
+**Overlay detail:** the rule also sets `touchpad/vibration_enable=false`. On iface 2 (`…61EB.000A`) that node is absent; udev logs it and ignores it. The four IMU writes still apply (`udevadm test --action=change` on that HID device).
+
 **Persistent fix we own for this case:**
 
 `/etc/udev/rules.d/99-legion-go2-imu-fix.rules`
@@ -89,6 +108,9 @@ done
 
 # Stock still uses the wrong name
 grep imu_bypass /usr/lib/udev/rules.d/99-inputplumber-device-setup.rules
+
+# Overlay missing after a Windows round trip (reboot will not restore the IMUs)
+test -f /etc/udev/rules.d/99-legion-go2-imu-fix.rules || echo "overlay missing"
 ```
 
 **Upstream wish (Case A):** Valve / ShadowBlip fix the typo and also set `imu_enabled=true` on both handles. When that ships, the overlay may be unnecessary — re-test and update this case.
@@ -102,7 +124,7 @@ cd "devices/legion-go-2/fixes/gyroscope-imu-udev"
 ./fix-legion-go2-gyro.sh
 ```
 
-**Current scope:** Case A only (udev overlay + set the four IMU attrs + restart InputPlumber + verify).
+**Current scope:** Case A only (udev overlay + set the four IMU attrs + restart InputPlumber + verify). The attr write waits up to about 2s for the controller to confirm; an immediate `false` readback is the 2026-11-16 lag, not a rejected write.
 
 **Intent:** Grow this script as new failure cases are documented in §3 — same entry point, broader coverage over time.
 
@@ -186,6 +208,9 @@ Game Mode → Steam Input → enable gyro on the Deck/Steam Controller style pro
 | Enabling IIO screen gyro *and* handle gyros with huge gain | Double path + bad scale → chaos |
 | Editing `/usr/share/inputplumber/...` only | SteamOS updates overwrite `/usr`; prefer `/etc` overlays or udev |
 | Treating Case A as the only possible failure | Other breaks exist; diagnose the full chain in §1 |
+| Blaming Secure Boot or boot order after a Windows round trip | Those do not write the handle IMU attrs. Check the four flags and whether the overlay exists |
+| Treating one immediate `false` readback as a rejected write | `hid-lenovo-go` confirms a moment later. Retry ~2s before calling it a new case |
+| Trusting `Gyroscope:*` capabilities while flags are off | InputPlumber advertises the path even when the handles are not streaming |
 
 ---
 
@@ -202,7 +227,7 @@ Game Mode → Steam Input → enable gyro on the Deck/Steam Controller style pro
 
 ### Broken (examples)
 
-- Case A: attrs `false` / `unknown` after update that left only stock udev
+- Case A: attrs `false` / `unknown` after an update, or after a Windows boot, when only stock udev is present
 - Custom binary / `GYRO_GAIN` override left behind
 - Only `xbox-elite` target and no manager refresh
 - `hid-lenovo-go` not bound (wrong controller mode / detached oddity) → script fails with “no handle dirs”
@@ -213,12 +238,15 @@ Game Mode → Steam Input → enable gyro on the Deck/Steam Controller style pro
 ## 8. Quick recovery decision tree
 
 ```text
-Gyro dead after SteamOS update?
+Gyro dead after a SteamOS update, or after booting Windows and coming back?
+├─ Check the four IMU attrs and /etc/udev/rules.d/99-legion-go2-imu-fix.rules
+│   (Windows can clear persisted flags; Secure Boot / boot order do not)
 ├─ Run ./fix-legion-go2-gyro.sh   (currently Case A)
 │   ├─ Success → test in-game
 │   └─ Failure → open debug dump from ~/Downloads
 │         ├─ No hid-lenovo-go handles → controller mode / driver / USB
-│         ├─ Attrs won't stick at true → kernel/sysfs / permissions
+│         ├─ Attrs false for ~1s then true → readback lag (script retries; not a new case)
+│         ├─ Attrs still not true after the retry → kernel/sysfs / permissions
 │         ├─ IP not active → systemctl status/journal inputplumber
 │         └─ Attrs OK but no Gyroscope caps → IP version / profile / filtered events
 │             (may be a new case — document in §3)

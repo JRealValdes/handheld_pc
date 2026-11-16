@@ -10,7 +10,7 @@ Knowledge + automation for Legion Go 2 gyro on SteamOS. Failures can have more t
 
 ## Current script coverage
 
-`fix-legion-go2-gyro.sh` currently addresses **Case A** only: stock udev never enables handle IMUs (wrong sysfs names / missing `imu_enabled`). The script is expected to grow as more cases are documented.
+`fix-legion-go2-gyro.sh` currently addresses **Case A** only: stock udev never enables handle IMUs (wrong sysfs names / missing `imu_enabled`). A Windows boot can clear the flags the controller had remembered; without this overlay, a SteamOS reboot does not turn them back on. Secure Boot and boot order are unrelated. The script waits briefly for the controller to confirm the write. It is expected to grow as more cases are documented.
 
 ## Apply
 

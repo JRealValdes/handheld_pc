@@ -99,8 +99,16 @@ enable_imu_attrs() {
         fail "Could not write true to $path"
         continue
       fi
-      local val
+      # hid-lenovo-go applies the feature report asynchronously. An immediate
+      # read often still shows the previous value (2026-11-16: write succeeded,
+      # cat was still false, all four attrs were true about a second later).
+      local val tries=0
       val="$(read_trim "$path")"
+      while [[ "$val" != "true" && $tries -lt 10 ]]; do
+        sleep 0.2
+        val="$(read_trim "$path")"
+        tries=$((tries + 1))
+      done
       if [[ "$val" != "true" ]]; then
         fail "After write, $path reads '$val' (expected true)"
       else
